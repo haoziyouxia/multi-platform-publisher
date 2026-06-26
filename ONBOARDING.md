@@ -89,11 +89,11 @@ NODE_OPTIONS="" node research.js all
 
 ## 七、代码仓库
 
-GitHub 仓库地址：（待你创建后填入）
+GitHub: **https://github.com/haoziyouxia/multi-platform-publisher**
 
 ```bash
-git remote add origin <你的GitHub仓库URL>
-git push -u origin main
+git clone https://github.com/haoziyouxia/multi-platform-publisher.git
+cd multi-platform-publisher
 ```
 
 ---
