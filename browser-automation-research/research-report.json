@@ -1,0 +1,111 @@
+{
+  "timestamp": "2026-06-26T03:20:32.835Z",
+  "config": {
+    "headless": true,
+    "timeout": 30000,
+    "viewport": {
+      "width": 1920,
+      "height": 1080
+    },
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  },
+  "results": [
+    {
+      "platform": "小红书",
+      "url": "https://www.xiaohongshu.com",
+      "createUrl": "https://creator.xiaohongshu.com",
+      "status": "success",
+      "findings": [
+        "首页标题: 小红书 - 你的生活兴趣社区",
+        "创作者中心标题: 小红书创作服务平台"
+      ],
+      "screenshots": [
+        "xiaohongshu_home.png",
+        "xiaohongshu_creator.png"
+      ],
+      "elementResults": {
+        "home": {
+          "登录按钮": "✅ 找到",
+          "扫码登录区域": "✅ 找到",
+          "手机号登录": "✅ 找到",
+          "页面主体": "❌ 未找到 (page.waitForSelector: Timeout 10000ms exceeded.\nCa...)"
+        },
+        "creator": {
+          "登录引导": "❌ 未找到 (page.waitForSelector: Timeout 10000ms exceeded.\nCa...)",
+          "二维码区域": "❌ 未找到 (page.waitForSelector: Timeout 10000ms exceeded.\nCa...)",
+          "手机登录入口": "❌ 未找到 (page.waitForSelector: Timeout 10000ms exceeded.\nCa...)"
+        }
+      },
+      "riskLevel": "medium"
+    },
+    {
+      "platform": "微信公众号",
+      "url": "https://mp.weixin.qq.com",
+      "createUrl": "https://mp.weixin.qq.com/cgi-bin/appmsg",
+      "status": "success",
+      "findings": [
+        "首页标题: 微信公众平台",
+        "访问编辑器后实际URL: https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit&action=edit&type=77",
+        "公众号后台采用 SPA 架构，核心操作在登录后进行",
+        "发布流程：上传素材(API) → 创建草稿(API) → 提交发布(API)",
+        "注意：个人订阅号需浏览器自动化模拟网页操作"
+      ],
+      "screenshots": [
+        "wechat_mp_home.png",
+        "wechat_editor_redirect.png"
+      ],
+      "elementResults": {
+        "login": {
+          "登录表单": "✅ 找到",
+          "账号输入": "❌ 未找到 (page.waitForSelector: Timeout 10000ms exceeded.\nCa...)",
+          "密码输入": "❌ 未找到 (page.waitForSelector: Timeout 10000ms exceeded.\nCa...)",
+          "登录按钮": "❌ 未找到 (page.waitForSelector: Timeout 10000ms exceeded.\nCa...)",
+          "二维码登录": "✅ 找到"
+        }
+      },
+      "riskLevel": "low"
+    },
+    {
+      "platform": "今日头条",
+      "url": "https://mp.toutiao.com",
+      "createUrl": "https://mp.toutiao.com/profile_v4/",
+      "status": "success",
+      "findings": [
+        "首页标题: 头条号 - 你创作的，就是头条",
+        "反自动化检测: ✅ 未检测到明显反自动化标识",
+        "发布页实际URL: https://mp.toutiao.com/auth/page/login?redirect_url=JTJGcHJvZmlsZV92NCUyRmdyYXBoaWMlMkZwdWJsaXNo",
+        "未登录时正确重定向到登录页 ✅",
+        "参考开源方案: toutiao-ops (Playwright + stealth)",
+        "发布流程：登录 → 创作者平台 → 文章编辑 → 封面处理 → 发布"
+      ],
+      "screenshots": [
+        "toutiao_mp_home.png",
+        "toutiao_publish_redirect.png"
+      ],
+      "elementResults": {
+        "login": {
+          "登录区域": "✅ 找到",
+          "手机号输入": "✅ 找到",
+          "扫码登录": "✅ 找到",
+          "登录按钮": "✅ 找到",
+          "页面主体": "✅ 找到"
+        }
+      },
+      "riskLevel": "medium"
+    },
+    {
+      "platform": "反检测验证",
+      "status": "success",
+      "findings": [
+        "navigator.webdriver: false",
+        "window.chrome: 存在",
+        "plugins数量: 3",
+        "navigator.vendor: Google Inc."
+      ],
+      "elementResults": {},
+      "screenshots": [
+        "antibot_detection.png"
+      ]
+    }
+  ]
+}
