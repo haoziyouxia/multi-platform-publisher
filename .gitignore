@@ -4,3 +4,17 @@ node_modules/
 dist/
 .DS_Store
 screenshots/
+# 依赖
+server/node_modules/
+client/node_modules/
+client/dist/
+
+# 数据库
+server/data/
+server/sessions/
+
+# 环境变量
+server/.env
+
+# 上传文件
+server/uploads/
