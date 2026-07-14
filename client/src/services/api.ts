@@ -5,9 +5,9 @@ const api = axios.create({
   timeout: 30000,
 });
 
-// 响应拦截器
+// 响应拦截器：错误统一处理
 api.interceptors.response.use(
-  response => response.data,
+  response => response,
   error => {
     const message = error.response?.data?.error || '网络请求失败';
     console.error('[API Error]', message);

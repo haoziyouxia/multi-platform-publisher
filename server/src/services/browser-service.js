@@ -9,6 +9,7 @@ const fs = require('fs');
 chromium.use(StealthPlugin());
 
 let browserInstance = null;
+let browserHeadless = process.env.BROWSER_HEADLESS !== 'false';
 
 const SESSION_DIR = path.join(__dirname, '..', '..', 'sessions');
 if (!fs.existsSync(SESSION_DIR)) {
@@ -17,28 +18,39 @@ if (!fs.existsSync(SESSION_DIR)) {
 
 /**
  * 获取或创建浏览器实例
+ * @param {Object} opts - { headless?: boolean }
  */
-async function getBrowser() {
-  if (!browserInstance || !browserInstance.isConnected()) {
-    browserInstance = await chromium.launch({
-      headless: process.env.BROWSER_HEADLESS !== 'false',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-      ],
-    });
-    console.log('🌐 浏览器实例已启动');
+async function getBrowser(opts = {}) {
+  const wantHeadless = opts.headless !== undefined ? opts.headless : browserHeadless;
+  // 如果当前实例的 headless 状态与需求不一致，需要先关闭再重启
+  if (browserInstance && browserInstance.isConnected() && browserInstance._headless === wantHeadless) {
+    return browserInstance;
   }
+  if (browserInstance && browserInstance.isConnected() && browserInstance._headless !== wantHeadless) {
+    await browserInstance.close();
+    browserInstance = null;
+  }
+  browserInstance = await chromium.launch({
+    headless: wantHeadless,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+    ],
+  });
+  browserInstance._headless = wantHeadless;
+  console.log(`🌐 浏览器实例已启动 (headless=${wantHeadless})`);
   return browserInstance;
 }
 
 /**
  * 创建或恢复浏览器上下文（带会话）
+ * @param {string} sessionName - 会话标识（如 xiaohongshu_default）
+ * @param {Object} opts - { headless?: boolean }  临时覆盖浏览器 headless 配置
  */
-async function createContext(sessionName) {
-  const browser = await getBrowser();
+async function createContext(sessionName, opts = {}) {
+  const browser = await getBrowser(opts);
   const sessionPath = path.join(SESSION_DIR, `${sessionName}.json`);
 
   // 如果有保存的会话，加载它
