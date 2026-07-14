@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Image from '@tiptap/extension-image';
@@ -8,11 +9,13 @@ import PlatformSelector from '../components/PlatformSelector';
 import PublishProgress from '../components/PublishProgress';
 
 const EditorPage = () => {
+  const [searchParams] = useSearchParams();
   const [title, setTitle] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [publishing, setPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState<any>(null);
-  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(['wechat']);
+  const [contentId, setContentId] = useState<string | null>(null);
 
   const editor = useEditor({
     extensions: [
@@ -22,6 +25,27 @@ const EditorPage = () => {
     ],
     content: '',
   });
+
+  // 从选题二创「送入内容编辑」带 contentId 进入
+  useEffect(() => {
+    const id = searchParams.get('contentId');
+    if (!id || !editor) return;
+    (async () => {
+      try {
+        const res = await api.get(`/content/${id}`);
+        const c = res.data;
+        setContentId(c.id);
+        setTitle(c.title || '');
+        const imgs = Array.isArray(c.images)
+          ? c.images.map((x: any) => (typeof x === 'string' ? x : x.url)).filter(Boolean)
+          : [];
+        setImages(imgs);
+        editor.commands.setContent(c.body || '');
+      } catch {
+        // ignore
+      }
+    })();
+  }, [searchParams, editor]);
 
   // 上传图片
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -64,16 +88,25 @@ const EditorPage = () => {
     setPublishResult(null);
 
     try {
-      // 1. 创建内容
-      const contentRes = await api.post('/content', {
-        title,
-        body: editor?.getHTML() || '',
-        images: images.map(url => ({ url })),
-      });
+      let id = contentId;
+      if (id) {
+        await api.put(`/content/${id}`, {
+          title,
+          body: editor?.getHTML() || '',
+          images: images.map(url => ({ url })),
+        });
+      } else {
+        const contentRes = await api.post('/content', {
+          title,
+          body: editor?.getHTML() || '',
+          images: images.map(url => ({ url })),
+        });
+        id = contentRes.data.id;
+        setContentId(id);
+      }
 
-      // 2. 执行发布
       const publishRes = await api.post('/publish', {
-        content_id: contentRes.data.id,
+        content_id: id,
         platforms: selectedPlatforms,
       });
 

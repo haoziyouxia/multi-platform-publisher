@@ -9,6 +9,8 @@ require('dotenv').config();
 const accountRoutes = require('./routes/accounts');
 const contentRoutes = require('./routes/content');
 const publishRoutes = require('./routes/publish');
+const topicRoutes = require('./routes/topics');
+const rewriteRoutes = require('./routes/rewrite');
 const { initWebSocket } = require('./services/websocket-service');
 
 const app = express();
@@ -34,6 +36,8 @@ app.get('/api/health', (req, res) => {
 app.use('/api/accounts', accountRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/publish', publishRoutes);
+app.use('/api/topics', topicRoutes);
+app.use('/api/rewrite', rewriteRoutes);
 
 // 错误处理
 app.use((err, req, res, next) => {

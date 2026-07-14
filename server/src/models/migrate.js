@@ -57,16 +57,70 @@ db.exec(`
   );
 `);
 
+// ========== hot_topics 表（多榜融合热词快照） ==========
+db.exec(`
+  CREATE TABLE IF NOT EXISTS hot_topics (
+    id TEXT PRIMARY KEY,
+    topic_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    hot_score REAL NOT NULL DEFAULT 0,
+    sources_json TEXT,
+    snapshot_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+// ========== source_articles 表（搜索抓取的候选文） ==========
+db.exec(`
+  CREATE TABLE IF NOT EXISTS source_articles (
+    id TEXT PRIMARY KEY,
+    topic_id TEXT,
+    topic_title TEXT,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    snippet TEXT,
+    body TEXT,
+    body_status TEXT DEFAULT 'partial' CHECK(body_status IN ('full', 'partial', 'failed')),
+    search_engine TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+// ========== rewrite_jobs 表（AI 二创任务） ==========
+db.exec(`
+  CREATE TABLE IF NOT EXISTS rewrite_jobs (
+    id TEXT PRIMARY KEY,
+    topic_id TEXT,
+    article_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'done', 'failed')),
+    model TEXT,
+    input_snapshot TEXT,
+    result_title TEXT,
+    result_body TEXT,
+    error_message TEXT,
+    content_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 // ========== 索引 ==========
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);
   CREATE INDEX IF NOT EXISTS idx_publish_tasks_content_id ON publish_tasks(content_id);
   CREATE INDEX IF NOT EXISTS idx_publish_tasks_status ON publish_tasks(status);
   CREATE INDEX IF NOT EXISTS idx_publish_tasks_platform ON publish_tasks(platform);
+  CREATE INDEX IF NOT EXISTS idx_hot_topics_snapshot ON hot_topics(snapshot_at);
+  CREATE INDEX IF NOT EXISTS idx_hot_topics_score ON hot_topics(hot_score);
+  CREATE INDEX IF NOT EXISTS idx_source_articles_topic ON source_articles(topic_id);
+  CREATE INDEX IF NOT EXISTS idx_rewrite_jobs_status ON rewrite_jobs(status);
 `);
 
 console.log('✅ accounts 表已就绪');
 console.log('✅ contents 表已就绪');
 console.log('✅ publish_tasks 表已就绪');
+console.log('✅ hot_topics 表已就绪');
+console.log('✅ source_articles 表已就绪');
+console.log('✅ rewrite_jobs 表已就绪');
 console.log('✅ 索引已创建');
 console.log('\n🎉 数据库迁移完成！');
