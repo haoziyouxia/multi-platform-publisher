@@ -53,12 +53,18 @@ async function createContext(sessionName, opts = {}) {
   const browser = await getBrowser(opts);
   const sessionPath = path.join(SESSION_DIR, `${sessionName}.json`);
 
-  // 如果有保存的会话，加载它
+  // 注意：User-Agent 必须与本机 OS 一致。原先写死 macOS UA，在 Windows 上
+  // 会导致公众号后台 CSS/响应式错乱（侧栏挤在一起、编辑器布局异常）。
   const contextOptions = {
-    viewport: { width: 1920, height: 1080 },
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    viewport: { width: 1440, height: 900 },
+    deviceScaleFactor: 1,
+    isMobile: false,
+    hasTouch: false,
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     locale: 'zh-CN',
     timezoneId: 'Asia/Shanghai',
+    colorScheme: 'light',
   };
 
   if (fs.existsSync(sessionPath)) {

@@ -18,3 +18,7 @@ server/.env
 
 # 上传文件
 server/uploads/
+
+# debug dumps
+server/debug/
+
