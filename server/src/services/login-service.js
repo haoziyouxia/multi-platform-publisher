@@ -19,17 +19,29 @@ const SESSION_DIR = path.join(__dirname, '..', '..', 'sessions');
 /**
  * 各平台登录配置
  */
+/**
+ * 平台页常有长连接/轮询，networkidle 容易永远等不到。
+ * 统一用 domcontentloaded + 更长超时，再靠后续选择器判断是否登录成功。
+ */
+const GOTO_OPTS = { waitUntil: 'domcontentloaded', timeout: 60000 };
+
 const LOGIN_CONFIG = {
   xiaohongshu: {
     name: '小红书',
     url: 'https://www.xiaohongshu.com',
     // 登录成功后页面会跳走或出现用户头像
-    successSelector: '.user-avatar, .avatar, [class*="user-info"]',
+    successSelector: '.user-avatar, .avatar, [class*="user-info"], [class*="avatar"]',
+    isLoggedIn: async (page) => {
+      const url = page.url();
+      if (url.includes('login') || url.includes('passport')) return false;
+      const el = await page.$('.user-avatar, .avatar, [class*="user-info"]');
+      return !!el;
+    },
     // 昵称提取（从 localStorage 或页面元素）
     nicknameExtract: async (page) => {
       try {
         // 优先从创作者中心获取
-        await page.goto('https://creator.xiaohongshu.com', { waitUntil: 'networkidle', timeout: 15000 });
+        await page.goto('https://creator.xiaohongshu.com', GOTO_OPTS);
         await browserService.humanDelay(2000, 3000);
         const nickname = await page.$eval('.user-info .nickname, .avatar-container [class*="name"]', el => el.textContent?.trim())
           .catch(() => null);
@@ -44,14 +56,27 @@ const LOGIN_CONFIG = {
   wechat: {
     name: '公众号',
     url: 'https://mp.weixin.qq.com/',
-    successSelector: '#headerBar, .weui-desktop-account__nickname, [class*="account_nickname"]',
+    successSelector: '#headerBar, .weui-desktop-account__nickname, [class*="account_nickname"], .weui-desktop-account',
+    // 扫码成功后会从登录页跳到后台（token 等参数出现在 URL）
+    isLoggedIn: async (page) => {
+      const url = page.url();
+      if (url.includes('token=') || /mp\.weixin\.qq\.com\/cgi-bin\//.test(url)) {
+        return true;
+      }
+      const el = await page.$('#headerBar, .weui-desktop-account__nickname, .weui-desktop-account, [class*="account_nickname"]');
+      return !!el;
+    },
     nicknameExtract: async (page) => {
       try {
         await browserService.humanDelay(2000, 3000);
-        const nickname = await page.$eval('#headerBar .account_nickname, .weui-desktop-account__nickname', el => el.textContent?.trim())
-          .catch(() => null);
-        const avatar = await page.$eval('#headerBar .account__avatar img, .weui-desktop-account__avatar img', el => el.src)
-          .catch(() => null);
+        const nickname = await page.$eval(
+          '#headerBar .account_nickname, .weui-desktop-account__nickname, .weui-desktop-account__info .weui-desktop-account__nickname',
+          el => el.textContent?.trim()
+        ).catch(() => null);
+        const avatar = await page.$eval(
+          '#headerBar .account__avatar img, .weui-desktop-account__avatar img, .weui-desktop-account__info img',
+          el => el.src
+        ).catch(() => null);
         return { nickname, avatar };
       } catch {
         return { nickname: null, avatar: null };
@@ -62,6 +87,18 @@ const LOGIN_CONFIG = {
     name: '头条号',
     url: 'https://mp.toutiao.com/',
     successSelector: '.user-info, .user-avatar, [class*="userName"]',
+    isLoggedIn: async (page) => {
+      const url = page.url();
+      if (url.includes('login') || url.includes('auth')) return false;
+      if (url.includes('mp.toutiao.com') && !url.includes('login')) {
+        const el = await page.$('.user-info, .user-avatar, [class*="userName"]');
+        if (el) return true;
+        // 创作者后台首页也可能没有这些 class，用 cookie 粗判
+        const cookies = await page.context().cookies();
+        return cookies.some(c => /session|sid|uid|auth/i.test(c.name) && c.value);
+      }
+      return false;
+    },
     nicknameExtract: async (page) => {
       try {
         await browserService.humanDelay(2000, 3000);
@@ -101,12 +138,12 @@ async function login(platform) {
     context = await browserService.createContext(sessionName, { headless: false });
     page = await context.newPage();
 
-    // 打开登录页
-    await page.goto(config.url, { waitUntil: 'networkidle', timeout: 30000 });
+    // 打开登录页（勿用 networkidle：公众号/头条后台常有长连接导致超时）
+    await page.goto(config.url, GOTO_OPTS);
     await browserService.humanDelay(2000, 4000);
 
-    // 等待登录成功（轮询 successSelector）
-    const loggedIn = await waitForLogin(page, config.successSelector, 120000);
+    // 等待登录成功（选择器 + 平台自定义 isLoggedIn）
+    const loggedIn = await waitForLogin(page, config, 120000);
     if (!loggedIn) {
       await page.close();
       await context.close();
@@ -163,24 +200,22 @@ async function login(platform) {
 }
 
 /**
- * 轮询等待登录成功（检测页面上出现登录后元素）
+ * 轮询等待登录成功
+ * @param {import('playwright').Page} page
+ * @param {object} config - LOGIN_CONFIG 项
  */
-async function waitForLogin(page, selector, timeout = 120000) {
+async function waitForLogin(page, config, timeout = 120000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     try {
-      const el = await page.$(selector);
-      if (el) return true;
-
-      // 也检查 URL 是否发生了有意义的跳转（各平台登录后 URL 可能变化）
-      const currentUrl = page.url();
-      if (currentUrl.includes('login') === false && currentUrl !== 'about:blank') {
-        // URL 已不再是登录页，可能已登录成功
-        const el2 = await page.$(selector);
-        if (el2) return true;
+      if (typeof config.isLoggedIn === 'function') {
+        if (await config.isLoggedIn(page)) return true;
+      } else if (config.successSelector) {
+        const el = await page.$(config.successSelector);
+        if (el) return true;
       }
     } catch {
-      // 忽略中间态
+      // 忽略中间态（导航中、DOM 重建）
     }
     await browserService.humanDelay(1000, 2000);
   }

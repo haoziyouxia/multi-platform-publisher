@@ -103,7 +103,7 @@ async function publish(content) {
   try {
     // ======== 1. 进入公众号后台 ========
     log('正在进入公众号后台...');
-    await page.goto(LOGIN_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await browserService.humanDelay(2000, 3000);
 
     // ======== 2. 检查登录态 ========
@@ -120,7 +120,7 @@ async function publish(content) {
     // ======== 3. 进入图文编辑器 ========
     const editorUrl = token ? `${EDITOR_URL}${token}` : LOGIN_URL;
     log(`正在进入图文编辑器...${token ? `(token=${token.slice(0, 8)}...)` : ''}`);
-    await page.goto(editorUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(editorUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await browserService.humanDelay(3000, 5000);
 
     // 再次检测登录态（编辑器页面可能再次重定向）
