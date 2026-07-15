@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../models/db');
 const { getArticleById } = require('./search/article-search');
 const { getTopicById } = require('./hotlist/topic-service');
+const { getNicheById } = require('./niches/catalog');
 const { rewriteArticle } = require('./ai/openai-compatible');
 
 async function startRewrite(articleId) {
@@ -13,8 +14,18 @@ async function startRewrite(articleId) {
     throw Object.assign(new Error('候选文章不存在'), { status: 404 });
   }
 
-  const topic = article.topic_id ? getTopicById(article.topic_id) : null;
+  // topic_id 可能是热词 uuid，或 niche:middle_aged_men
+  let topic = null;
+  let niche = null;
+  if (article.topic_id && String(article.topic_id).startsWith('niche:')) {
+    const nicheId = String(article.topic_id).slice('niche:'.length);
+    niche = getNicheById(nicheId);
+  } else if (article.topic_id) {
+    topic = getTopicById(article.topic_id);
+  }
+
   const id = uuidv4();
+  const topicLabel = niche?.name || topic?.title || article.topic_title || '';
 
   db.prepare(`
     INSERT INTO rewrite_jobs (id, topic_id, article_id, status, input_snapshot)
@@ -24,7 +35,8 @@ async function startRewrite(articleId) {
     article.topic_id || null,
     articleId,
     JSON.stringify({
-      topic: topic?.title || article.topic_title,
+      topic: topicLabel,
+      niche_id: niche?.id || null,
       sourceTitle: article.title,
       sourceUrl: article.url,
       body_status: article.body_status,
@@ -33,7 +45,15 @@ async function startRewrite(articleId) {
 
   try {
     const result = await rewriteArticle({
-      topic: topic?.title || article.topic_title || '',
+      topic: topicLabel,
+      niche: niche
+        ? {
+            name: niche.name,
+            audience: niche.audience,
+            tone: niche.tone,
+            angles: niche.angles,
+          }
+        : null,
       sourceTitle: article.title,
       sourceBody: article.body || article.snippet || '',
       sourceUrl: article.url,

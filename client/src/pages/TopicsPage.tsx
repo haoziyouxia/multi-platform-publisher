@@ -2,18 +2,14 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 
-interface HotSource {
-  source: string;
-  rank: number;
-  raw_title: string;
-}
-
-interface HotTopic {
+interface Niche {
   id: string;
-  title: string;
-  hot_score: number;
-  sources: HotSource[];
-  snapshot_at: string;
+  name: string;
+  emoji: string;
+  description: string;
+  audience: string;
+  angles: string[];
+  default?: boolean;
 }
 
 interface Article {
@@ -36,23 +32,15 @@ interface RewriteJob {
   model?: string;
 }
 
-const SOURCE_LABEL: Record<string, string> = {
-  baidu_hot: '百度',
-  weibo_hot: '微博',
-  zhihu_hot: '知乎',
-};
-
 const TopicsPage = () => {
   const navigate = useNavigate();
-  const [topics, setTopics] = useState<HotTopic[]>([]);
-  const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
-  const [sourceErrors, setSourceErrors] = useState<any[]>([]);
-  const [loadingTopics, setLoadingTopics] = useState(false);
-  const [filter, setFilter] = useState('');
+  const [niches, setNiches] = useState<Niche[]>([]);
+  const [selectedNiche, setSelectedNiche] = useState<Niche | null>(null);
+  const [extraQuery, setExtraQuery] = useState('');
 
-  const [selectedTopic, setSelectedTopic] = useState<HotTopic | null>(null);
   const [articles, setArticles] = useState<Article[]>([]);
   const [loadingArticles, setLoadingArticles] = useState(false);
+  const [searchQueries, setSearchQueries] = useState<string[]>([]);
 
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
   const [rewriting, setRewriting] = useState(false);
@@ -63,45 +51,41 @@ const TopicsPage = () => {
   const [publishing, setPublishing] = useState(false);
   const [message, setMessage] = useState('');
 
-  const loadTopics = async (force = false) => {
-    setLoadingTopics(true);
-    setMessage('');
-    try {
-      const res = await api.get(`/topics${force ? '?force=1' : ''}`, { timeout: 180000 });
-      setTopics(res.data.topics || []);
-      setSnapshotAt(res.data.snapshot_at || null);
-      setSourceErrors(res.data.source_errors || []);
-      if (res.data.warning) setMessage(res.data.warning);
-    } catch (err: any) {
-      setMessage(err.response?.data?.error || err.message || '加载热榜失败');
-    } finally {
-      setLoadingTopics(false);
-    }
-  };
-
   useEffect(() => {
-    loadTopics(false);
+    (async () => {
+      try {
+        const res = await api.get('/topics/niches');
+        const list: Niche[] = res.data.niches || [];
+        setNiches(list);
+        const def = list.find((n) => n.default) || list[0] || null;
+        if (def) setSelectedNiche(def);
+      } catch (err: any) {
+        setMessage(err.response?.data?.error || err.message || '加载赛道失败');
+      }
+    })();
   }, []);
 
-  const selectTopic = async (topic: HotTopic, force = false) => {
-    setSelectedTopic(topic);
+  const searchNiche = async (niche: Niche, force = false) => {
+    setSelectedNiche(niche);
     setSelectedArticle(null);
     setJob(null);
     setEditTitle('');
     setEditBody('');
     setLoadingArticles(true);
-    setMessage(`正在搜索「${topic.title}」相关文章…`);
+    setMessage(`正在搜索「${niche.name}」赛道相关文章…`);
     try {
       const res = await api.post(
-        `/topics/${topic.id}/search`,
-        { force },
+        `/topics/niches/${niche.id}/search`,
+        { force, query: extraQuery.trim() || undefined },
         { timeout: 180000 }
       );
       setArticles(res.data.articles || []);
+      setSearchQueries(res.data.queries || []);
       setMessage(
         res.data.cached
-          ? '已使用近期搜索缓存（5 分钟内）'
-          : `找到 ${(res.data.articles || []).length} 篇候选`
+          ? `已使用「${niche.name}」近期搜索缓存`
+          : res.data.warning ||
+            `「${niche.name}」找到 ${(res.data.articles || []).length} 篇候选`
       );
     } catch (err: any) {
       setArticles([]);
@@ -115,13 +99,13 @@ const TopicsPage = () => {
     setSelectedArticle(article);
     setRewriting(true);
     setJob(null);
-    setMessage('AI 二创中，请稍候…');
+    setMessage(`AI 按「${selectedNiche?.name || '赛道'}」口吻二创中…`);
     try {
       const res = await api.post('/rewrite', { article_id: article.id }, { timeout: 180000 });
       setJob(res.data);
       setEditTitle(res.data.result_title || '');
       setEditBody(res.data.result_body || '');
-      setMessage(`二创完成（模型: ${res.data.model || '—'}）`);
+      setMessage(`二创完成（${res.data.model || '—'}）· 赛道：${selectedNiche?.name || '—'}`);
     } catch (err: any) {
       setMessage(err.response?.data?.error || err.message || '二创失败');
       if (err.response?.data?.job) setJob(err.response.data.job);
@@ -131,13 +115,11 @@ const TopicsPage = () => {
   };
 
   const applyToEditor = async () => {
-    if (!job?.id) return;
+    if (!job?.id && !editTitle.trim()) return;
     setApplying(true);
     try {
-      // 若用户改过预览，先不改 DB job；apply 用服务端结果。
-      // 若有本地编辑，直接创建 content。
-      let contentId = job.content_id;
-      if (editTitle !== job.result_title || editBody !== job.result_body) {
+      let contentId = job?.content_id;
+      if (!job?.id || editTitle !== job.result_title || editBody !== job.result_body) {
         const contentRes = await api.post('/content', {
           title: editTitle,
           body: editBody,
@@ -169,12 +151,12 @@ const TopicsPage = () => {
         body: editBody,
         images: [],
       });
-      const publishRes = await api.post(
+      await api.post(
         '/publish',
         { content_id: contentRes.data.id, platforms: ['wechat'] },
         { timeout: 300000 }
       );
-      setMessage(`已提交公众号发布任务（${publishRes.data?.tasks?.length || 1}）`);
+      setMessage('已提交公众号发布任务');
       navigate('/history');
     } catch (err: any) {
       setMessage(err.response?.data?.error || err.message || '发布失败');
@@ -183,28 +165,12 @@ const TopicsPage = () => {
     }
   };
 
-  const filtered = topics.filter((t) =>
-    !filter.trim() || t.title.toLowerCase().includes(filter.trim().toLowerCase())
-  );
-
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h1 className="page-title" style={{ marginBottom: 0 }}>选题二创</h1>
-        <button
-          className="btn btn-primary"
-          onClick={() => loadTopics(true)}
-          disabled={loadingTopics}
-        >
-          {loadingTopics ? '刷新中…' : '刷新热榜'}
-        </button>
-      </div>
-
+      <h1 className="page-title">选题二创</h1>
       <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 16 }}>
-        多榜融合（百度 / 微博 / 知乎）→ 选一个赛道 → 自动搜文 → AI 二创 → 公众号草稿
-        {snapshotAt && (
-          <span> · 快照: {new Date(snapshotAt).toLocaleString()}</span>
-        )}
+        先选<strong>垂直赛道（人群）</strong>，再搜文 → AI 按该赛道口吻二创 → 公众号草稿。
+        默认推荐：<strong>中年男人</strong>。
       </p>
 
       {message && (
@@ -223,84 +189,86 @@ const TopicsPage = () => {
         </div>
       )}
 
-      {sourceErrors.length > 0 && (
-        <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 12 }}>
-          部分榜源失败: {sourceErrors.map((e) => e.name || e.source).join('、')}
+      {/* 赛道选择 */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3 style={{ fontSize: 15, marginBottom: 12 }}>① 选择赛道</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
+          {niches.map((n) => {
+            const active = selectedNiche?.id === n.id;
+            return (
+              <button
+                key={n.id}
+                type="button"
+                onClick={() => setSelectedNiche(n)}
+                style={{
+                  textAlign: 'left',
+                  padding: 14,
+                  borderRadius: 10,
+                  border: active ? '2px solid var(--primary)' : '1px solid var(--border)',
+                  background: active ? '#eef2ff' : '#fff',
+                  cursor: 'pointer',
+                }}
+              >
+                <div style={{ fontSize: 20, marginBottom: 6 }}>{n.emoji}</div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>
+                  {n.name}
+                  {n.default ? (
+                    <span style={{ fontSize: 11, color: 'var(--primary)', marginLeft: 6 }}>推荐</span>
+                  ) : null}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6, lineHeight: 1.4 }}>
+                  {n.description}
+                </div>
+              </button>
+            );
+          })}
         </div>
-      )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
-        {/* 步骤 1 热榜 */}
-        <div className="card" style={{ maxHeight: '70vh', overflow: 'auto' }}>
-          <h3 style={{ marginBottom: 12, fontSize: 15 }}>① 选赛道</h3>
-          <input
-            className="input"
-            placeholder="过滤热词…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            style={{ marginBottom: 12 }}
-          />
-          {loadingTopics && <div style={{ color: 'var(--text-secondary)' }}>加载热榜中…</div>}
-          {!loadingTopics && filtered.length === 0 && (
-            <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-              暂无数据，请点击「刷新热榜」
+        {selectedNiche && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
+              读者：{selectedNiche.audience}
+              <br />
+              角度：{(selectedNiche.angles || []).join(' · ')}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <input
+                className="input"
+                style={{ flex: 1, minWidth: 200 }}
+                placeholder="可选：补充关键词，如「裁员」「啤酒肚」「房贷」"
+                value={extraQuery}
+                onChange={(e) => setExtraQuery(e.target.value)}
+              />
+              <button
+                className="btn btn-primary"
+                disabled={loadingArticles}
+                onClick={() => searchNiche(selectedNiche, true)}
+              >
+                {loadingArticles ? '搜索中…' : `搜索「${selectedNiche.name}」素材`}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        {/* 候选文 */}
+        <div className="card" style={{ maxHeight: '65vh', overflow: 'auto' }}>
+          <h3 style={{ fontSize: 15, marginBottom: 12 }}>
+            ② 候选文章
+            {selectedNiche ? ` · ${selectedNiche.name}` : ''}
+          </h3>
+          {searchQueries.length > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10 }}>
+              搜索词：{searchQueries.join(' / ')}
             </div>
           )}
-          <ul style={{ listStyle: 'none' }}>
-            {filtered.map((t, idx) => (
-              <li key={t.id}>
-                <button
-                  type="button"
-                  onClick={() => selectTopic(t)}
-                  style={{
-                    width: '100%',
-                    textAlign: 'left',
-                    padding: '10px 12px',
-                    marginBottom: 6,
-                    borderRadius: 8,
-                    border:
-                      selectedTopic?.id === t.id
-                        ? '1px solid var(--primary)'
-                        : '1px solid var(--border)',
-                    background: selectedTopic?.id === t.id ? '#eef2ff' : '#fff',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>
-                    {idx + 1}. {t.title}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
-                    分 {t.hot_score.toFixed(2)} ·{' '}
-                    {(t.sources || [])
-                      .map((s) => SOURCE_LABEL[s.source] || s.source)
-                      .filter((v, i, a) => a.indexOf(v) === i)
-                      .join('/')}
-                  </div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        {/* 步骤 2 文章 */}
-        <div className="card" style={{ maxHeight: '70vh', overflow: 'auto' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-            <h3 style={{ fontSize: 15 }}>② 候选文章</h3>
-            {selectedTopic && (
-              <button
-                className="btn btn-secondary"
-                style={{ fontSize: 12, padding: '4px 10px' }}
-                disabled={loadingArticles}
-                onClick={() => selectTopic(selectedTopic, true)}
-              >
-                重新抓取
-              </button>
-            )}
-          </div>
-          {!selectedTopic && (
-            <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>请先选择左侧赛道</div>
+          {!articles.length && !loadingArticles && (
+            <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+              选好赛道后点「搜索素材」。例如选中年男人，会搜焦虑/健康/职场等方向。
+            </div>
           )}
-          {loadingArticles && <div style={{ color: 'var(--text-secondary)' }}>搜索抓取中…</div>}
+          {loadingArticles && <div style={{ color: 'var(--text-secondary)' }}>搜索抓取中，约 1～2 分钟…</div>}
           <ul style={{ listStyle: 'none' }}>
             {articles.map((a) => (
               <li key={a.id} style={{ marginBottom: 10 }}>
@@ -316,20 +284,15 @@ const TopicsPage = () => {
                 >
                   <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{a.title}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-                    {(a.snippet || a.body || '').slice(0, 100)}
-                    {(a.snippet || a.body || '').length > 100 ? '…' : ''}
+                    {(a.snippet || a.body || '').slice(0, 120)}
+                    {(a.snippet || a.body || '').length > 120 ? '…' : ''}
                   </div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <a
-                      href={a.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ fontSize: 12 }}
-                    >
+                    <a href={a.url} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
                       原文
                     </a>
                     <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                      {a.body_status} · {a.search_engine}
+                      {a.body_status}
                     </span>
                     <button
                       className="btn btn-primary"
@@ -346,15 +309,18 @@ const TopicsPage = () => {
           </ul>
         </div>
 
-        {/* 步骤 3 二创结果 */}
-        <div className="card" style={{ maxHeight: '70vh', overflow: 'auto' }}>
-          <h3 style={{ marginBottom: 12, fontSize: 15 }}>③ AI 二创预览</h3>
+        {/* 二创预览 */}
+        <div className="card" style={{ maxHeight: '65vh', overflow: 'auto' }}>
+          <h3 style={{ fontSize: 15, marginBottom: 12 }}>
+            ③ AI 二创预览
+            {selectedNiche ? ` · 写给${selectedNiche.name}` : ''}
+          </h3>
           {!job && !rewriting && (
             <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-              选择一篇候选文章并点击「AI 二创」
+              选一篇候选文点「AI 二创」，会用 {selectedNiche?.name || '当前赛道'} 的口吻改写。
             </div>
           )}
-          {rewriting && <div>生成中，可能需要 30～90 秒…</div>}
+          {rewriting && <div>生成中（gpt-5.5），可能需要 30～90 秒…</div>}
           {(job?.status === 'done' || editTitle) && (
             <>
               <input
@@ -387,9 +353,6 @@ const TopicsPage = () => {
                   {publishing ? '发布中…' : '保存并发公众号草稿'}
                 </button>
               </div>
-              <p style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 10 }}>
-                请二次确认内容合规；勿直接搬运原文。需在 server/.env 配置 AI_API_KEY。
-              </p>
             </>
           )}
           {job?.status === 'failed' && (

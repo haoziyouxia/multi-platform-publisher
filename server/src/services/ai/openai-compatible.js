@@ -12,22 +12,33 @@ function getConfig() {
   };
 }
 
-function buildPrompt({ topic, sourceTitle, sourceBody, sourceUrl }) {
+function buildPrompt({ topic, sourceTitle, sourceBody, sourceUrl, niche }) {
   const material = (sourceBody || '').slice(0, 6000);
+  const nicheBlock = niche
+    ? `
+## 垂直赛道（必须贴合）
+- 赛道名称：${niche.name}
+- 目标读者：${niche.audience || ''}
+- 文风要求：${niche.tone || ''}
+- 可切入角度：${(niche.angles || []).join('；')}
+写给「${niche.name}」人群看，标题与案例要像在跟这个群体说话，不要写成泛娱乐热搜解读。
+`
+    : `
+## 赛道/话题
+${topic || '综合热点'}
+`;
+
   return `你是资深微信公众号编辑。请基于以下「参考素材」做二次创作，输出一篇适合公众号发表的原创向图文。
 
 ## 硬性要求
 1. 必须换角度、换结构，禁止逐段洗稿或大段照抄。
 2. 不要编造具体数据、机构名称与虚假引用；不确定就写得更谨慎。
-3. 标题不超过 64 个汉字。
+3. 标题不超过 64 个汉字；标题要有代入感，适合目标读者点击。
 4. 正文约 800～1500 字，用简洁 HTML：仅使用 <p>、<h2>、<ul>、<li>、<strong>。
 5. 只输出 JSON，不要 markdown 代码围栏，不要其它说明文字。
 JSON 格式：
 {"title":"标题","body_html":"<p>段落</p>"}
-
-## 赛道/话题
-${topic || '综合热点'}
-
+${nicheBlock}
 ## 参考标题
 ${sourceTitle || ''}
 
@@ -35,7 +46,7 @@ ${sourceTitle || ''}
 ${sourceUrl || ''}
 
 ## 参考正文/摘要
-${material || '（素材较少，请围绕话题做观点型公众号文章，并声明信息有限）'}
+${material || '（素材较少，请围绕赛道痛点做观点型公众号文章，并声明信息有限）'}
 `;
 }
 
