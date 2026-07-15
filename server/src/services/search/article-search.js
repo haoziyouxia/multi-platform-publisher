@@ -15,12 +15,81 @@ const DOMAIN_BLACKLIST = [
   'taobao.com',
   'tmall.com',
   'jd.com',
+  // 明显非中文内容站 / 噪音
+  'microsoft.com',
+  'apple.com',
+  'wikipedia.org',
+  'amazon.com',
+  'reddit.com',
+  'youtube.com',
+  'tacobell.com',
+];
+
+/** 中文内容站优先（用于排序加权） */
+const ZH_DOMAIN_BONUS = [
+  'zhihu.com',
+  'mp.weixin.qq.com',
+  'weixin.qq.com',
+  'jianshu.com',
+  'toutiao.com',
+  'sohu.com',
+  '163.com',
+  'qq.com',
+  'sina.com',
+  'ifeng.com',
+  '36kr.com',
+  'sspai.com',
+  'douban.com',
+  'bilibili.com',
+  'csdn.net',
+  'cnblogs.com',
+  'baidu.com',
+  'thepaper.cn',
+  'caixin.com',
+  'yicai.com',
+  'cls.cn',
+  'xueqiu.com',
+  'huxiu.com',
+  'guokr.com',
 ];
 
 function isBadUrl(url) {
   if (!url || !/^https?:\/\//i.test(url)) return true;
   const lower = url.toLowerCase();
   return DOMAIN_BLACKLIST.some((b) => lower.includes(b));
+}
+
+/**
+ * 是否像中文标题/摘要（垂直赛道面向中文公众号，过滤英文垃圾结果）
+ */
+function looksChinese(text) {
+  if (!text) return false;
+  const s = String(text);
+  const zh = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+  const letters = (s.match(/[A-Za-z]/g) || []).length;
+  // 至少 4 个汉字，且汉字不少于英文字母的一半（避免纯英文）
+  return zh >= 4 && zh >= letters * 0.5;
+}
+
+function isChineseResult(item) {
+  return looksChinese(item.title) || looksChinese(item.snippet);
+}
+
+function domainBonus(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    if (ZH_DOMAIN_BONUS.some((d) => host.endsWith(d))) return 2;
+    if (host.endsWith('.cn') || host.endsWith('.com.cn')) return 1;
+  } catch { /* ignore */ }
+  return 0;
+}
+
+function rankChineseResults(items) {
+  return [...items].sort((a, b) => {
+    const sa = (looksChinese(a.title) ? 3 : 0) + (looksChinese(a.snippet) ? 1 : 0) + domainBonus(a.url);
+    const sb = (looksChinese(b.title) ? 3 : 0) + (looksChinese(b.snippet) ? 1 : 0) + domainBonus(b.url);
+    return sb - sa;
+  });
 }
 
 async function safeEvaluate(page, fn, arg, retries = 3) {
@@ -44,17 +113,60 @@ async function safeEvaluate(page, fn, arg, retries = 3) {
   throw lastErr;
 }
 
-async function searchBing(page, query, limit = 8) {
-  const q = encodeURIComponent(query);
-  await page.goto(`https://www.bing.com/search?q=${q}&setlang=zh-CN&mkt=zh-CN`, {
+/**
+ * 百度优先：中文垂直赛道（中年男人等）必须走中文搜索
+ * 查询词自动加「中文内容」约束，减少英文站噪音
+ */
+function toChineseQuery(query) {
+  const q = String(query || '').trim();
+  // 已是中文关键词则再补站点偏好
+  if (/[\u4e00-\u9fff]/.test(q)) {
+    return `${q} 公众号 OR 知乎 OR 经验`;
+  }
+  return `${q} 中文`;
+}
+
+async function searchBaidu(page, query, limit = 8) {
+  const q = encodeURIComponent(toChineseQuery(query));
+  // rn=20 多取一些再过滤英文
+  await page.goto(`https://www.baidu.com/s?wd=${q}&rn=20&ie=utf-8`, {
     waitUntil: 'domcontentloaded',
     timeout: 45000,
   });
   await browserService.humanDelay(2500, 4000);
-  // 等结果节点；没有也不抛，后面走百度
+  await page.waitForSelector('#content_left .result, #content_left .c-container', { timeout: 15000 }).catch(() => {});
+
+  const raw = await safeEvaluate(page, (max) => {
+    const results = [];
+    document.querySelectorAll('#content_left .result, #content_left .c-container').forEach((el) => {
+      if (results.length >= max) return;
+      const a = el.querySelector('h3 a, a[href]');
+      const title = (a?.innerText || a?.textContent || '').trim();
+      const url = a?.href || '';
+      const sn = el.querySelector('.c-abstract, .content-right_8Zs40, .c-span-last, .c-color-text');
+      const snippet = (sn?.innerText || sn?.textContent || '').trim();
+      if (title && url) results.push({ title, url, snippet });
+    });
+    return results;
+  }, Math.max(limit * 2, 12));
+
+  return rankChineseResults(raw.filter(isChineseResult)).slice(0, limit);
+}
+
+async function searchBing(page, query, limit = 8) {
+  // 强制中文区 + 简体界面；query 带中文约束
+  const q = encodeURIComponent(toChineseQuery(query));
+  await page.goto(
+    `https://cn.bing.com/search?q=${q}&setlang=zh-Hans&mkt=zh-CN&cc=CN&ensearch=0`,
+    {
+      waitUntil: 'domcontentloaded',
+      timeout: 45000,
+    }
+  );
+  await browserService.humanDelay(2500, 4000);
   await page.waitForSelector('#b_results li.b_algo, #b_results .b_algo', { timeout: 12000 }).catch(() => {});
 
-  return safeEvaluate(page, (max) => {
+  const raw = await safeEvaluate(page, (max) => {
     const results = [];
     const nodes = document.querySelectorAll('#b_results > li.b_algo, #b_results li.b_algo');
     nodes.forEach((li) => {
@@ -67,32 +179,9 @@ async function searchBing(page, query, limit = 8) {
       if (title && url) results.push({ title, url, snippet });
     });
     return results;
-  }, limit);
-}
+  }, Math.max(limit * 2, 12));
 
-async function searchBaidu(page, query, limit = 8) {
-  const q = encodeURIComponent(query);
-  await page.goto(`https://www.baidu.com/s?wd=${q}`, {
-    waitUntil: 'domcontentloaded',
-    timeout: 45000,
-  });
-  await browserService.humanDelay(2500, 4000);
-  await page.waitForSelector('#content_left .result, #content_left .c-container', { timeout: 12000 }).catch(() => {});
-
-  return safeEvaluate(page, (max) => {
-    const results = [];
-    document.querySelectorAll('#content_left .result, #content_left .c-container').forEach((el) => {
-      if (results.length >= max) return;
-      const a = el.querySelector('h3 a, a');
-      const title = (a?.innerText || '').trim();
-      let url = a?.href || '';
-      // 百度跳转链也可能可用
-      const sn = el.querySelector('.c-abstract, .content-right_8Zs40, .c-span-last');
-      const snippet = (sn?.innerText || '').trim();
-      if (title && url) results.push({ title, url, snippet });
-    });
-    return results;
-  }, limit);
+  return rankChineseResults(raw.filter(isChineseResult)).slice(0, limit);
 }
 
 async function extractBody(page, url) {
@@ -164,34 +253,37 @@ async function searchAndSaveArticles(topic, { force = false } = {}) {
   const seenUrls = new Set();
 
   try {
+    // 中文赛道：百度优先，Bing 中文站兜底（避免国际 Bing 吐英文垃圾）
     for (const q of queries.slice(0, 4)) {
-      console.log(`[Search] 查询: ${q}`);
+      console.log(`[Search] 查询(中文优先): ${q}`);
       let batch = [];
       try {
-        batch = await searchBing(page, q, 6);
-        if (batch.length) engine = 'bing';
+        batch = await searchBaidu(page, q, 6);
+        if (batch.length) engine = 'baidu';
       } catch (err) {
-        console.warn('[Search] Bing 失败:', err.message);
+        console.warn('[Search] 百度失败:', err.message);
         batch = [];
       }
-      if (!batch.length) {
+      if (batch.length < 3) {
         try {
-          batch = await searchBaidu(page, q, 6);
-          if (batch.length) engine = 'baidu';
+          const more = await searchBing(page, q, 6);
+          if (more.length && engine !== 'baidu') engine = 'bing';
+          batch = batch.concat(more);
         } catch (err) {
-          console.warn('[Search] 百度失败:', err.message);
-          batch = [];
+          console.warn('[Search] Bing 失败:', err.message);
         }
       }
       for (const item of batch) {
         if (!item.url || seenUrls.has(item.url)) continue;
+        if (isBadUrl(item.url)) continue;
+        if (!isChineseResult(item)) continue; // 丢掉纯英文
         seenUrls.add(item.url);
         raw.push(item);
       }
       if (raw.length >= 10) break;
     }
 
-    const filtered = raw.filter((r) => !isBadUrl(r.url)).slice(0, 8);
+    const filtered = rankChineseResults(raw).slice(0, 8);
     if (filtered.length === 0) {
       console.warn('[Search] 无搜索结果，使用话题占位素材');
       const id = uuidv4();
