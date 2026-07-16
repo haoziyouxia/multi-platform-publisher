@@ -110,7 +110,7 @@ function getNicheById(id) {
  * @param {object} niche
  * @param {string} [userQuery] 用户自定义补充词
  */
-function pickSearchQueries(niche, userQuery, count = 3) {
+function pickSearchQueries(niche, userQuery, count = 5) {
   const base = [...(niche.keywords || [])];
   // 打乱后取前 count 个，保证每次刷新略有变化
   for (let i = base.length - 1; i > 0; i--) {
@@ -121,9 +121,10 @@ function pickSearchQueries(niche, userQuery, count = 3) {
   if (userQuery && userQuery.trim()) {
     picked.unshift(`${niche.name} ${userQuery.trim()}`);
   }
-  // 再加一条「赛道名 + 公众号/经验」偏图文
+  // 再加「真实经历 / 干货」向，减少广告词结果
   picked.push(`${niche.name} 真实经历 中国`);
-  return [...new Set(picked)].slice(0, count + 1);
+  picked.push(`${niche.name} 经验分享 -加微信 -课程`);
+  return [...new Set(picked)].slice(0, count + 2);
 }
 
 module.exports = {

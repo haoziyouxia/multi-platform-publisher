@@ -77,15 +77,19 @@ const TopicsPage = () => {
       const res = await api.post(
         `/topics/niches/${niche.id}/search`,
         { force, query: extraQuery.trim() || undefined },
-        { timeout: 180000 }
+        // 多查询词 + 多正文抽取，最长约 3～5 分钟
+        { timeout: 300000 }
       );
       setArticles(res.data.articles || []);
       setSearchQueries(res.data.queries || []);
+      const n = (res.data.articles || []).length;
+      const spam = res.data.filtered_spam || 0;
+      const spamHint = spam > 0 ? `，已屏蔽广告/引流 ${spam} 条` : '';
       setMessage(
         res.data.cached
-          ? `已使用「${niche.name}」近期搜索缓存`
+          ? `已使用「${niche.name}」近期搜索缓存（${n} 篇${spamHint}）`
           : res.data.warning ||
-            `「${niche.name}」找到 ${(res.data.articles || []).length} 篇候选`
+            `「${niche.name}」找到 ${n} 篇候选${spamHint}`
       );
     } catch (err: any) {
       setArticles([]);
@@ -95,19 +99,52 @@ const TopicsPage = () => {
     }
   };
 
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** 创建任务后轮询，避免 AI 慢时前端 axios 超时显示“失败” */
+  const pollRewriteJob = async (jobId: string, maxMs = 300000) => {
+    const started = Date.now();
+    let delay = 1500;
+    while (Date.now() - started < maxMs) {
+      const res = await api.get(`/rewrite/${jobId}`, { timeout: 30000 });
+      const j: RewriteJob = res.data;
+      setJob(j);
+      if (j.status === 'done') return j;
+      if (j.status === 'failed') {
+        throw Object.assign(new Error(j.error_message || '二创失败'), { job: j });
+      }
+      const elapsedSec = Math.round((Date.now() - started) / 1000);
+      setMessage(
+        `AI 按「${selectedNiche?.name || '赛道'}」口吻二创中…（已等待 ${elapsedSec}s，请稍候）`
+      );
+      await sleep(delay);
+      delay = Math.min(delay + 500, 4000);
+    }
+    throw new Error('二创等待超时（超过 5 分钟），请稍后在本页重试');
+  };
+
   const runRewrite = async (article: Article) => {
     setSelectedArticle(article);
     setRewriting(true);
     setJob(null);
+    setEditTitle('');
+    setEditBody('');
     setMessage(`AI 按「${selectedNiche?.name || '赛道'}」口吻二创中…`);
     try {
-      const res = await api.post('/rewrite', { article_id: article.id }, { timeout: 180000 });
+      // 后端立即返回 pending/running job，真正生成在后台
+      const res = await api.post('/rewrite', { article_id: article.id }, { timeout: 30000 });
       setJob(res.data);
-      setEditTitle(res.data.result_title || '');
-      setEditBody(res.data.result_body || '');
-      setMessage(`二创完成（${res.data.model || '—'}）· 赛道：${selectedNiche?.name || '—'}`);
+      const done =
+        res.data.status === 'done'
+          ? res.data
+          : await pollRewriteJob(res.data.id);
+      setJob(done);
+      setEditTitle(done.result_title || '');
+      setEditBody(done.result_body || '');
+      setMessage(`二创完成（${done.model || '—'}）· 赛道：${selectedNiche?.name || '—'}`);
     } catch (err: any) {
       setMessage(err.response?.data?.error || err.message || '二创失败');
+      if (err.job) setJob(err.job);
       if (err.response?.data?.job) setJob(err.response.data.job);
     } finally {
       setRewriting(false);
@@ -320,7 +357,17 @@ const TopicsPage = () => {
               选一篇候选文点「AI 二创」，会用 {selectedNiche?.name || '当前赛道'} 的口吻改写。
             </div>
           )}
-          {rewriting && <div>生成中（gpt-5.5），可能需要 30～90 秒…</div>}
+          {rewriting && (
+            <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 10 }}>
+              生成中（{job?.status === 'running' ? '模型写作中' : job?.status === 'pending' ? '排队中' : '提交中'}）…
+              通常 30～90 秒，请勿关闭页面。
+            </div>
+          )}
+          {job?.status === 'failed' && (
+            <div style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>
+              {job.error_message || '二创失败，请换一篇或稍后重试'}
+            </div>
+          )}
           {(job?.status === 'done' || editTitle) && (
             <>
               <input
@@ -352,6 +399,9 @@ const TopicsPage = () => {
                 >
                   {publishing ? '发布中…' : '保存并发公众号草稿'}
                 </button>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                  草稿将自动填写：作者「咸鱼翻炒炸」· 封面（按标题生成）· 声明原创
+                </div>
               </div>
             </>
           )}

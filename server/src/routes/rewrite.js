@@ -6,6 +6,7 @@ const router = express.Router();
 const rewriteService = require('../services/rewrite-service');
 
 // POST /api/rewrite  { article_id }
+// 立即返回 pending job；客户端应轮询 GET /api/rewrite/:id
 router.post('/', async (req, res) => {
   try {
     const { article_id } = req.body || {};
@@ -13,7 +14,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: '缺少 article_id' });
     }
     const job = await rewriteService.startRewrite(article_id);
-    res.status(201).json(job);
+    res.status(202).json(job);
   } catch (err) {
     console.error('[Rewrite]', err);
     res.status(err.status || 500).json({

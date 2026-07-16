@@ -21,7 +21,7 @@ router.post('/niches/:nicheId/search', async (req, res) => {
     }
     const force = !!(req.body && req.body.force);
     const userQuery = (req.body && req.body.query) || '';
-    const queries = pickSearchQueries(niche, userQuery, 3);
+    const queries = pickSearchQueries(niche, userQuery, 5);
     const topic = {
       id: `niche:${niche.id}`,
       title: niche.name,

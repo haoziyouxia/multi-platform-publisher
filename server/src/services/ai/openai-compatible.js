@@ -8,7 +8,7 @@ function getConfig() {
     apiKey: process.env.AI_API_KEY || process.env.OPENAI_API_KEY || '',
     baseUrl: (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     model: process.env.AI_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini',
-    timeout: Number(process.env.AI_TIMEOUT_MS || 120000),
+    timeout: Number(process.env.AI_TIMEOUT_MS || 180000),
   };
 }
 
@@ -109,6 +109,13 @@ async function rewriteArticle(input) {
 
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content || '';
+    if (!content && data.error) {
+      throw new Error(
+        typeof data.error === 'string'
+          ? data.error
+          : data.error.message || JSON.stringify(data.error).slice(0, 300)
+      );
+    }
     try {
       const parsed = parseModelJson(content);
       return { ...parsed, model: cfg.model };
@@ -121,6 +128,13 @@ async function rewriteArticle(input) {
         model: cfg.model,
       };
     }
+  } catch (err) {
+    if (err?.name === 'AbortError' || /aborted/i.test(err?.message || '')) {
+      const e = new Error(`AI 请求超时（>${cfg.timeout}ms），请稍后重试或增大 AI_TIMEOUT_MS`);
+      e.code = 'AI_TIMEOUT';
+      throw e;
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }

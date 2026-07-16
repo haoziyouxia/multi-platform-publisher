@@ -5,14 +5,16 @@
  *   1. 加载会话 → 进入公众号后台首页
  *   2. 检查登录态并提取 token
  *   3. 通过 UI / URL 进入「新建图文」编辑器（不要写死 type=77，新版常无效）
- *   4. 填写标题 + 正文
- *   5. 上传图片（如有）
- *   6. 保存草稿（MVP 成功标准）
- *   7. 尝试群发/发表（可选）
+ *   4. 填写标题 + 作者 + 正文
+ *   5. 设置封面图 + 声明原创
+ *   6. 上传正文图片（如有）
+ *   7. 保存草稿（MVP 成功标准）
+ *   8. 尝试群发/发表（可选）
  *
  * 注意：个人订阅号每天群发次数有限；草稿保存成功即视为本阶段成功。
  */
 const browserService = require('../browser-service');
+const { generateWechatCover } = require('../cover-generator');
 const path = require('path');
 const fs = require('fs');
 
@@ -26,6 +28,10 @@ const EDITOR_URL_TYPE77 = 'https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appms
 
 const UPLOAD_DIR = path.resolve(__dirname, '..', '..', '..', 'uploads');
 const DEBUG_DIR = path.resolve(__dirname, '..', '..', '..', 'debug');
+
+/** 默认作者（公众号作者字段 ≤ 8 字） */
+const DEFAULT_AUTHOR = (process.env.WECHAT_AUTHOR || '咸鱼翻炒炸').slice(0, 8);
+const DECLARE_ORIGINAL = process.env.WECHAT_DECLARE_ORIGINAL !== 'false';
 
 const SELECTORS = {
   loggedIn: [
@@ -143,6 +149,22 @@ async function publish(content) {
 
   let keepOpenOnError = false;
   try {
+    // 先生成封面（独立浏览器），避免与发布会话抢 headless 实例
+    if (!content.cover && !content.cover_path) {
+      try {
+        const preTitle = (content.title || '今日分享').slice(0, 64);
+        const preAuthor = (content.author || content.wechat_author || DEFAULT_AUTHOR).slice(0, 8);
+        content._generatedCoverPath = await generateWechatCover({
+          title: preTitle,
+          author: preAuthor,
+          subtitle: content.niche_name || content.topic || '中年男人 · 生活与搞钱',
+        });
+        log(`预生成封面: ${content._generatedCoverPath}`);
+      } catch (e) {
+        log(`预生成封面失败（稍后重试）: ${e.message}`);
+      }
+    }
+
     // ======== 1. 进入后台首页 ========
     log('正在进入公众号后台...');
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -191,6 +213,11 @@ async function publish(content) {
       await fillTitle(page, title, log);
     }
 
+    // ======== 3.5 作者 ========
+    const author = (content.author || content.wechat_author || DEFAULT_AUTHOR).slice(0, 8);
+    log(`正在填写作者: ${author}`);
+    await fillAuthor(page, author, log);
+
     // ======== 4. 填写正文 ========
     if (content.body) {
       log('正在填写正文...');
@@ -198,15 +225,27 @@ async function publish(content) {
       await browserService.humanDelay(800, 1200);
     }
 
-    // ======== 5. 上传图片 ========
+    // ======== 5. 封面图（必填项，无则按标题自动生成） ========
+    log('正在设置封面...');
+    await setCoverImage(page, content, title, author, log);
+
+    // ======== 5.5 声明原创 ========
+    if (DECLARE_ORIGINAL && content.declare_original !== false) {
+      log('正在声明原创...');
+      await declareOriginal(page, log);
+    } else {
+      log('跳过声明原创（WECHAT_DECLARE_ORIGINAL=false 或 content.declare_original=false）');
+    }
+
+    // ======== 6. 上传正文图片 ========
     if (content.images && content.images.length > 0) {
-      log(`准备上传 ${content.images.length} 张图片`);
+      log(`准备上传 ${content.images.length} 张正文图片`);
       await uploadImages(page, content.images, log);
     }
 
     await browserService.humanDelay(1000, 2000);
 
-    // ======== 6. 保存草稿（MVP 成功标准） ========
+    // ======== 7. 保存草稿（MVP 成功标准） ========
     log('正在保存为草稿...');
     const saved = await clickSaveDraft(page, log);
     if (saved) {
@@ -221,30 +260,47 @@ async function publish(content) {
       throw new Error('找不到「保存为草稿」按钮（#js_submit），请检查编辑器底部工具栏');
     }
 
-    // ======== 7. 尝试发表（可选，失败不阻断草稿成功） ========
-    log('尝试点击发表...');
-    const publishedClick = await clickPublish(page, log);
-    if (!publishedClick) {
-      log('⚠️ 未找到/未点击发表，以草稿保存作为成功结果');
+    // ======== 8. 尝试发表（可选，失败不阻断草稿成功） ========
+    // 默认只保存草稿；需要真正发表时设 WECHAT_TRY_PUBLISH=true
+    if (process.env.WECHAT_TRY_PUBLISH === 'true') {
+      log('尝试点击发表...');
+      const publishedClick = await clickPublish(page, log);
+      if (!publishedClick) {
+        log('⚠️ 未找到/未点击发表，以草稿保存作为成功结果');
+        await browserService.saveSession(context);
+        return {
+          postId: `wechat_draft_${Date.now()}`,
+          url: page.url(),
+          draftOnly: true,
+          author,
+        };
+      }
+
+      await browserService.humanDelay(1000, 2000);
+      const confirmed = await clickFirst(page, SELECTORS.confirmBtn, log, '确认');
+      if (confirmed) log('✅ 已点击确认');
+      else log('⚠️ 未检测到二次确认弹窗');
+
+      log('等待发布结果...');
+      const result = await waitForPublishResult(page, log);
       await browserService.saveSession(context);
+
+      log(`🎉 发布流程结束! postId=${result.postId || 'N/A'}`);
       return {
-        postId: `wechat_draft_${Date.now()}`,
+        postId: result.postId || `wechat_${Date.now()}`,
         url: page.url(),
-        draftOnly: true,
+        author,
       };
     }
 
-    await browserService.humanDelay(1000, 2000);
-    const confirmed = await clickFirst(page, SELECTORS.confirmBtn, log, '确认');
-    if (confirmed) log('✅ 已点击确认');
-    else log('⚠️ 未检测到二次确认弹窗');
-
-    log('等待发布结果...');
-    const result = await waitForPublishResult(page, log);
+    log('✅ 草稿保存完成（默认不点发表，设 WECHAT_TRY_PUBLISH=true 可尝试发表）');
     await browserService.saveSession(context);
-
-    log(`🎉 发布流程结束! postId=${result.postId || 'N/A'}`);
-    return { postId: result.postId || `wechat_${Date.now()}`, url: page.url() };
+    return {
+      postId: `wechat_draft_${Date.now()}`,
+      url: page.url(),
+      draftOnly: true,
+      author,
+    };
   } catch (err) {
     log(`发布异常: ${err.message}`);
     await dumpDebug(page, 'publish-error').catch(() => {});
@@ -454,6 +510,509 @@ async function readTitleValue(page) {
     const pm = document.querySelector('div.ProseMirror');
     return pm ? (pm.innerText || '').trim() : '';
   }).catch(() => '');
+}
+
+/**
+ * 填写作者：#author / input.js_author，最多 8 字
+ */
+async function fillAuthor(page, author, log) {
+  const name = String(author || DEFAULT_AUTHOR).slice(0, 8);
+  try {
+    const ok = await page.evaluate((text) => {
+      const el =
+        document.querySelector('input#author') ||
+        document.querySelector('input.js_author') ||
+        document.querySelector('input[name="author"]');
+      if (!el) return false;
+      el.focus();
+      el.value = text;
+      const proto = window.HTMLInputElement?.prototype;
+      const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+      return true;
+    }, name);
+
+    if (ok) {
+      const val = await page.evaluate(() => {
+        const el =
+          document.querySelector('input#author') ||
+          document.querySelector('input.js_author');
+        return el ? el.value : '';
+      });
+      log(`✅ 作者已填写: "${val || name}"`);
+      return true;
+    }
+
+    // locator 兜底
+    const loc = page.locator('input#author, input.js_author, input[name="author"]').first();
+    if ((await loc.count()) > 0) {
+      await loc.fill(name, { force: true, timeout: 5000 });
+      log(`✅ 作者 fill: ${name}`);
+      return true;
+    }
+    log('⚠️ 未找到作者输入框，继续后续流程');
+    return false;
+  } catch (err) {
+    log(`⚠️ 填写作者失败: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * 解析封面本地路径：优先 content.cover / images[0]，否则按标题生成
+ */
+async function resolveCoverPath(content, title, author, log) {
+  const candidates = [];
+  if (content._generatedCoverPath) candidates.push(content._generatedCoverPath);
+  if (content.cover) candidates.push(content.cover);
+  if (content.cover_path) candidates.push(content.cover_path);
+  if (content.images && content.images.length) {
+    candidates.push(content.images[0].url || content.images[0]);
+  }
+
+  for (const c of candidates) {
+    if (!c || typeof c !== 'string') continue;
+    if (path.isAbsolute(c) && fs.existsSync(c)) return c;
+    const asUpload = path.join(UPLOAD_DIR, path.basename(c.replace(/^\/uploads\//, '')));
+    if (fs.existsSync(asUpload)) return asUpload;
+    // 相对 uploads
+    const rel = path.join(UPLOAD_DIR, c.replace(/^\/+/, ''));
+    if (fs.existsSync(rel)) return rel;
+  }
+
+  log('无现成封面，按标题自动生成…');
+  const generated = await generateWechatCover({
+    title,
+    author,
+    subtitle: content.niche_name || content.topic || '中年男人 · 生活与搞钱',
+  });
+  log(`✅ 已生成封面: ${generated}`);
+  return generated;
+}
+
+/**
+ * 设置封面：点击「拖拽或选择封面」→ 本地上传 → 确认裁剪弹窗
+ */
+async function setCoverImage(page, content, title, author, log) {
+  let coverPath;
+  try {
+    coverPath = await resolveCoverPath(content, title, author, log);
+  } catch (err) {
+    log(`⚠️ 封面准备失败: ${err.message}`);
+    await dumpDebug(page, 'cover-prepare-failed');
+    return false;
+  }
+  if (!coverPath || !fs.existsSync(coverPath)) {
+    log('⚠️ 封面文件不存在，跳过');
+    return false;
+  }
+
+  // 滚到封面区域
+  await page.evaluate(() => {
+    const el =
+      document.querySelector('#js_cover_area') ||
+      document.querySelector('#js_cover_description_area') ||
+      document.querySelector('.js_cover_btn_area');
+    if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+  }).catch(() => {});
+  await browserService.humanDelay(400, 700);
+
+  // 若已有封面预览则跳过
+  const hasCover = await page.evaluate(() => {
+    const preview = document.querySelector('.js_cover_preview_new');
+    if (!preview) return false;
+    const style = window.getComputedStyle(preview);
+    if (style.display === 'none') return false;
+    const bg = preview.style.backgroundImage || '';
+    return bg.includes('url') && !bg.includes('url("")') && !bg.includes('url(&quot;&quot;)');
+  }).catch(() => false);
+  if (hasCover && !content.force_cover) {
+    log('检测到已有封面，跳过上传');
+    return true;
+  }
+
+  // 监听 file chooser：点击封面区域
+  try {
+    const coverBtn = page.locator(
+      '.js_cover_btn_area, #js_cover_area .select-cover__btn, #js_cover_area, text=拖拽或选择封面'
+    ).first();
+
+    // 优先：页面上 cover 区域内的 file input
+    const coverFileInput = page.locator('#js_cover_area input[type="file"], .js_cover_btn_area input[type="file"]').first();
+    if ((await coverFileInput.count()) > 0) {
+      await coverFileInput.setInputFiles(coverPath);
+      log('✅ 封面文件已通过 cover 区域 input 上传');
+    } else {
+      // filechooser 方式
+      const [fileChooser] = await Promise.all([
+        page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null),
+        coverBtn.click({ timeout: 8000, force: true }).catch(async () => {
+          await page.evaluate(() => {
+            const el =
+              document.querySelector('.js_cover_btn_area') ||
+              document.querySelector('#js_cover_area .select-cover__btn');
+            if (el) el.click();
+          });
+        }),
+      ]);
+
+      if (fileChooser) {
+        await fileChooser.setFiles(coverPath);
+        log('✅ 封面已通过 filechooser 选择');
+      } else {
+        // 点击后可能弹出菜单：本地上传
+        const localUpload = page.locator(
+          'text=本地上传, li:has-text("本地上传"), .tpl_dropdown_menu_item:has-text("本地上传")'
+        ).first();
+        if ((await localUpload.count()) > 0) {
+          const inputInMenu = localUpload.locator('input[type="file"]').first();
+          if ((await inputInMenu.count()) > 0) {
+            await inputInMenu.setInputFiles(coverPath);
+            log('✅ 封面经「本地上传」菜单 input 上传');
+          } else {
+            const [fc2] = await Promise.all([
+              page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null),
+              localUpload.click({ force: true }),
+            ]);
+            if (fc2) {
+              await fc2.setFiles(coverPath);
+              log('✅ 封面经「本地上传」filechooser 上传');
+            } else {
+              // 全局找第一个可见 file input
+              const anyInput = page.locator('input[type="file"][accept*="image"]').last();
+              if ((await anyInput.count()) > 0) {
+                await anyInput.setInputFiles(coverPath);
+                log('✅ 封面经全局 file input 上传');
+              } else {
+                throw new Error('无法触发封面文件选择');
+              }
+            }
+          }
+        } else {
+          // 直接找页面上任意 image file input
+          const anyInput = page.locator('input[type="file"][accept*="image"]');
+          const n = await anyInput.count();
+          if (n > 0) {
+            await anyInput.nth(n - 1).setInputFiles(coverPath);
+            log('✅ 封面经末尾 file input 上传');
+          } else {
+            throw new Error('找不到封面上传入口');
+          }
+        }
+      }
+    }
+  } catch (err) {
+    log(`⚠️ 封面上传交互失败: ${err.message}`);
+    await dumpDebug(page, 'cover-upload-failed');
+    return false;
+  }
+
+  await browserService.humanDelay(1500, 2500);
+
+  // 处理「编辑封面」裁剪弹窗：点完成/确定/下一步
+  const cropOk = await confirmCoverCropDialog(page, log);
+  if (!cropOk) {
+    log('⚠️ 未确认到封面裁剪弹窗（可能已自动完成）');
+  }
+
+  // 等待封面预览出现
+  await page.waitForFunction(() => {
+    const preview = document.querySelector('.js_cover_preview_new');
+    if (preview) {
+      const style = window.getComputedStyle(preview);
+      const bg = preview.style.backgroundImage || '';
+      if (style.display !== 'none' && bg.includes('http')) return true;
+    }
+    const cdn = document.querySelector('input.js_cdn_url, input[name="cdn_url"]');
+    if (cdn && cdn.value) return true;
+    return false;
+  }, { timeout: 25000 }).catch(() => null);
+
+  const done = await page.evaluate(() => {
+    const cdn = document.querySelector('input.js_cdn_url, input[name="cdn_url"]');
+    if (cdn && cdn.value) return true;
+    const preview = document.querySelector('.js_cover_preview_new');
+    if (!preview) return false;
+    const bg = preview.style.backgroundImage || '';
+    return bg.includes('http') || bg.includes('mmbiz');
+  }).catch(() => false);
+
+  if (done) {
+    log('✅ 封面设置成功');
+    return true;
+  }
+  log('⚠️ 封面状态未确认成功，继续后续流程');
+  await dumpDebug(page, 'cover-status-unknown');
+  return false;
+}
+
+/**
+ * 封面裁剪/编辑弹窗确认
+ */
+async function confirmCoverCropDialog(page, log) {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    // 常见按钮文案
+    const buttons = [
+      page.getByRole('button', { name: /^(完成|确定|确认|下一步|保存)$/ }),
+      page.locator('button:has-text("完成")'),
+      page.locator('button:has-text("确定")'),
+      page.locator('a:has-text("完成")'),
+      page.locator('.weui-desktop-btn_primary:has-text("完成")'),
+      page.locator('.weui-desktop-btn_primary:has-text("确定")'),
+      page.locator('mp-image-edit-dialog button:has-text("完成")'),
+      page.locator('[class*="image-edit"] button:has-text("完成")'),
+      page.locator('[class*="image-edit"] button:has-text("确定")'),
+    ];
+
+    for (const loc of buttons) {
+      try {
+        if ((await loc.count()) === 0) continue;
+        const first = loc.first();
+        const visible = await first.isVisible().catch(() => false);
+        if (!visible) continue;
+        await first.click({ timeout: 3000 });
+        log('✅ 已点击封面编辑确认按钮');
+        await browserService.humanDelay(800, 1200);
+        // 可能有两步（下一步 → 完成）
+        continue;
+      } catch { /* next */ }
+    }
+
+    // 弹窗是否还在
+    const dialogVisible = await page.evaluate(() => {
+      const dialogs = document.querySelectorAll(
+        'mp-image-edit-dialog, .weui-desktop-dialog, [class*="image-edit"], [class*="crop"]'
+      );
+      return Array.from(dialogs).some((d) => {
+        const s = window.getComputedStyle(d);
+        return s.display !== 'none' && s.visibility !== 'hidden' && d.offsetParent !== null;
+      });
+    }).catch(() => false);
+
+    if (!dialogVisible) {
+      // 再点一次可能的完成
+      return true;
+    }
+    await browserService.humanDelay(500, 800);
+  }
+  return false;
+}
+
+/**
+ * 声明原创：点击「未声明」→ 处理 mp-claim-original-dialog
+ */
+async function declareOriginal(page, log) {
+  try {
+    // 已声明则跳过
+    const already = await page.evaluate(() => {
+      const open = document.querySelector('#js_original_open');
+      if (open) {
+        const s = window.getComputedStyle(open);
+        if (s.display !== 'none' && open.offsetParent !== null) return true;
+      }
+      const unset = document.querySelector('.js_unset_original_title');
+      if (unset && /已声明|原创/.test(unset.textContent || '') && !/未声明/.test(unset.textContent || '')) {
+        return true;
+      }
+      return false;
+    }).catch(() => false);
+
+    if (already) {
+      log('✅ 已是原创声明状态，跳过');
+      return true;
+    }
+
+    await page.evaluate(() => {
+      const el =
+        document.querySelector('#js_original') ||
+        document.querySelector('.js_original_apply_cell') ||
+        document.querySelector('.js_unset_original_title');
+      if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    }).catch(() => {});
+    await browserService.humanDelay(300, 500);
+
+    // 点击「未声明」开关区域
+    const switchLocators = [
+      page.locator('.js_unset_original_title'),
+      page.locator('#js_original .js_original_apply.js_edit_ori'),
+      page.locator('#js_original .setting-group__switch'),
+      page.locator('text=未声明'),
+      page.locator('#js_original'),
+    ];
+
+    let clicked = false;
+    for (const loc of switchLocators) {
+      try {
+        if ((await loc.count()) === 0) continue;
+        await loc.first().click({ timeout: 4000, force: true });
+        clicked = true;
+        log('已点击原创声明入口');
+        break;
+      } catch { /* next */ }
+    }
+
+    if (!clicked) {
+      // JS 点击
+      clicked = await page.evaluate(() => {
+        const el =
+          document.querySelector('.js_unset_original_title') ||
+          document.querySelector('#js_original .js_edit_ori') ||
+          document.querySelector('#js_original .setting-group__switch');
+        if (!el) return false;
+        el.click();
+        return true;
+      }).catch(() => false);
+    }
+
+    if (!clicked) {
+      log('⚠️ 未找到原创声明入口');
+      await dumpDebug(page, 'original-entry-miss');
+      return false;
+    }
+
+    await browserService.humanDelay(1000, 1800);
+
+    // 处理声明弹窗
+    const dialogOk = await confirmOriginalDialog(page, log);
+    if (!dialogOk) {
+      log('⚠️ 原创声明弹窗未完整确认（账号可能无原创权限或 UI 变更）');
+      await dumpDebug(page, 'original-dialog');
+      // 不抛错，草稿仍可保存
+      return false;
+    }
+
+    // 校验是否已声明
+    await browserService.humanDelay(800, 1200);
+    const declared = await page.evaluate(() => {
+      const open = document.querySelector('#js_original_open');
+      if (open) {
+        const s = window.getComputedStyle(open);
+        if (s.display !== 'none') return true;
+      }
+      const unset = document.querySelector('.js_unset_original_title');
+      if (unset && /未声明/.test(unset.textContent || '')) return false;
+      return !unset;
+    }).catch(() => false);
+
+    if (declared) {
+      log('✅ 原创声明成功');
+      return true;
+    }
+    log('⚠️ 原创声明状态未确认');
+    return false;
+  } catch (err) {
+    log(`⚠️ 声明原创异常: ${err.message}`);
+    await dumpDebug(page, 'original-error');
+    return false;
+  }
+}
+
+/**
+ * 原创声明弹窗：勾选同意 + 点确定/声明
+ */
+async function confirmOriginalDialog(page, log) {
+  const deadline = Date.now() + 25000;
+  let agreed = false;
+  let confirmed = false;
+
+  while (Date.now() < deadline) {
+    // 勾选协议
+    if (!agreed) {
+      const checks = [
+        page.locator('mp-claim-original-dialog input[type="checkbox"]'),
+        page.locator('.weui-desktop-dialog input[type="checkbox"]'),
+        page.locator('label:has-text("同意") input[type="checkbox"]'),
+        page.locator('label:has-text("原创") input[type="checkbox"]'),
+        page.locator('text=我同意').locator('..').locator('input[type="checkbox"]'),
+        page.locator('.weui-desktop-form__check-label input[type="checkbox"]'),
+      ];
+      for (const loc of checks) {
+        try {
+          const n = await loc.count();
+          for (let i = 0; i < n; i++) {
+            const c = loc.nth(i);
+            if (!(await c.isVisible().catch(() => false))) continue;
+            const isChecked = await c.isChecked().catch(() => false);
+            if (!isChecked) {
+              await c.check({ force: true }).catch(async () => {
+                await c.click({ force: true });
+              });
+            }
+            agreed = true;
+            log('已勾选原创协议');
+          }
+        } catch { /* next */ }
+      }
+
+      // 点「同意」文案本身
+      if (!agreed) {
+        const agreeText = page.locator(
+          'label:has-text("同意"), span:has-text("我同意"), div:has-text("同意《")'
+        ).first();
+        if ((await agreeText.count()) > 0 && (await agreeText.isVisible().catch(() => false))) {
+          await agreeText.click({ force: true }).catch(() => {});
+          agreed = true;
+          log('已点击同意协议文案');
+        }
+      }
+    }
+
+    // 确认按钮
+    const confirmBtns = [
+      page.getByRole('button', { name: /^(声明原创|确定|确认|同意并声明|下一步)$/ }),
+      page.locator('button:has-text("声明原创")'),
+      page.locator('button:has-text("同意并声明")'),
+      page.locator('button:has-text("确定")'),
+      page.locator('.weui-desktop-dialog .weui-desktop-btn_primary'),
+      page.locator('mp-claim-original-dialog button.weui-desktop-btn_primary'),
+      page.locator('mp-claim-original-dialog button:has-text("确定")'),
+    ];
+
+    for (const loc of confirmBtns) {
+      try {
+        if ((await loc.count()) === 0) continue;
+        const btn = loc.first();
+        if (!(await btn.isVisible().catch(() => false))) continue;
+        const disabled = await btn.isDisabled().catch(() => false);
+        if (disabled) continue;
+        await btn.click({ timeout: 3000 });
+        confirmed = true;
+        log('已点击原创声明确认');
+        await browserService.humanDelay(1000, 1500);
+        break;
+      } catch { /* next */ }
+    }
+
+    // 弹窗是否关闭
+    const stillOpen = await page.evaluate(() => {
+      const nodes = document.querySelectorAll(
+        'mp-claim-original-dialog, .weui-desktop-dialog, [class*="claim-original"]'
+      );
+      return Array.from(nodes).some((n) => {
+        const s = window.getComputedStyle(n);
+        return s.display !== 'none' && s.visibility !== 'hidden' && (n.offsetWidth > 0 || n.offsetHeight > 0);
+      });
+    }).catch(() => false);
+
+    if (confirmed && !stillOpen) return true;
+    if (confirmed && stillOpen) {
+      // 可能还有第二步
+      await browserService.humanDelay(500, 800);
+      continue;
+    }
+
+    // 没有弹窗出现：可能点击后直接声明，或权限不足
+    if (!stillOpen && Date.now() > deadline - 20000) {
+      // 等一会看是否出现
+    }
+    await browserService.humanDelay(600, 900);
+  }
+
+  return confirmed;
 }
 
 function isLoginPage(url) {

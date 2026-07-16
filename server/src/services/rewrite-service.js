@@ -1,5 +1,5 @@
 /**
- * 二创任务编排
+ * 二创任务编排（异步：先返回 job，后台跑 AI）
  */
 const { v4: uuidv4 } = require('uuid');
 const db = require('../models/db');
@@ -7,6 +7,9 @@ const { getArticleById } = require('./search/article-search');
 const { getTopicById } = require('./hotlist/topic-service');
 const { getNicheById } = require('./niches/catalog');
 const { rewriteArticle } = require('./ai/openai-compatible');
+
+/** 避免同一 job 重复执行 */
+const runningJobs = new Set();
 
 async function startRewrite(articleId) {
   const article = getArticleById(articleId);
@@ -29,7 +32,7 @@ async function startRewrite(articleId) {
 
   db.prepare(`
     INSERT INTO rewrite_jobs (id, topic_id, article_id, status, input_snapshot)
-    VALUES (?, ?, ?, 'running', ?)
+    VALUES (?, ?, ?, 'pending', ?)
   `).run(
     id,
     article.topic_id || null,
@@ -43,7 +46,43 @@ async function startRewrite(articleId) {
     })
   );
 
+  // 后台执行，不阻塞 HTTP
+  setImmediate(() => {
+    runRewriteJob(id).catch((err) => {
+      console.error('[Rewrite] background job failed', id, err.message);
+    });
+  });
+
+  return getJob(id);
+}
+
+async function runRewriteJob(jobId) {
+  if (runningJobs.has(jobId)) return;
+  runningJobs.add(jobId);
+
   try {
+    const job = getJob(jobId);
+    if (!job || job.status === 'done' || job.status === 'failed') return;
+
+    db.prepare(`
+      UPDATE rewrite_jobs SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?
+    `).run(jobId);
+
+    const article = getArticleById(job.article_id);
+    if (!article) {
+      throw new Error('候选文章不存在或已失效');
+    }
+
+    let topic = null;
+    let niche = null;
+    if (article.topic_id && String(article.topic_id).startsWith('niche:')) {
+      niche = getNicheById(String(article.topic_id).slice('niche:'.length));
+    } else if (article.topic_id) {
+      topic = getTopicById(article.topic_id);
+    }
+
+    const topicLabel = niche?.name || topic?.title || article.topic_title || '';
+
     const result = await rewriteArticle({
       topic: topicLabel,
       niche: niche
@@ -65,25 +104,36 @@ async function startRewrite(articleId) {
         model = ?,
         result_title = ?,
         result_body = ?,
+        error_message = NULL,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(result.model, result.title, result.body_html, id);
-
-    return getJob(id);
+    `).run(result.model, result.title, result.body_html, jobId);
   } catch (err) {
+    const message = normalizeErrorMessage(err);
+    console.error('[Rewrite] job', jobId, message);
     db.prepare(`
       UPDATE rewrite_jobs SET
         status = 'failed',
         error_message = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(err.message, id);
-    const job = getJob(id);
-    const e = new Error(err.message);
-    e.status = err.code === 'AI_NOT_CONFIGURED' ? 400 : 500;
-    e.job = job;
-    throw e;
+    `).run(message, jobId);
+  } finally {
+    runningJobs.delete(jobId);
   }
+}
+
+function normalizeErrorMessage(err) {
+  if (!err) return '二创失败';
+  const name = err.name || '';
+  const msg = err.message || String(err);
+  if (name === 'AbortError' || /aborted|abort/i.test(msg)) {
+    return 'AI 请求超时，请稍后重试（可增大 server/.env 中 AI_TIMEOUT_MS）';
+  }
+  if (/ECONNREFUSED|ENOTFOUND|fetch failed|network/i.test(msg)) {
+    return `无法连接 AI 服务：${msg}`;
+  }
+  return msg;
 }
 
 function getJob(id) {
@@ -133,4 +183,5 @@ module.exports = {
   startRewrite,
   getJob,
   applyToContent,
+  runRewriteJob,
 };

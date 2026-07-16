@@ -31,6 +31,14 @@ async function executePublish(tasks, contentId) {
   content.platform_variants = content.platform_variants 
     ? JSON.parse(content.platform_variants) : null;
 
+  // 公众号默认作者 / 原创声明（可被 platform_variants.wechat 覆盖）
+  if (!content.author) {
+    content.author = process.env.WECHAT_AUTHOR || '咸鱼翻炒炸';
+  }
+  if (content.declare_original === undefined) {
+    content.declare_original = process.env.WECHAT_DECLARE_ORIGINAL !== 'false';
+  }
+
   // 并行发布（限制并发数）
   const maxConcurrent = Number(process.env.MAX_CONCURRENT_PUBLISH || 3);
   const chunks = [];

@@ -1,9 +1,19 @@
 /**
  * 按赛道关键词搜索候选文章 + 正文抽取
+ * - 提高拉取量（多查询 / 多结果 / 多正文抽取）
+ * - 屏蔽广告、引流、卖课、加微信等垃圾内容
  */
 const { v4: uuidv4 } = require('uuid');
 const db = require('../../models/db');
 const browserService = require('../browser-service');
+
+/** 搜索规模（可用 env 覆盖） */
+const SEARCH_QUERY_LIMIT = Number(process.env.SEARCH_QUERY_LIMIT || 6);
+const SEARCH_PER_ENGINE = Number(process.env.SEARCH_PER_ENGINE || 12);
+const SEARCH_RAW_CAP = Number(process.env.SEARCH_RAW_CAP || 40);
+const SEARCH_RESULT_LIMIT = Number(process.env.SEARCH_RESULT_LIMIT || 20);
+const SEARCH_EXTRACT_COUNT = Number(process.env.SEARCH_EXTRACT_COUNT || 8);
+const SEARCH_LIST_LIMIT = Number(process.env.SEARCH_LIST_LIMIT || 40);
 
 const DOMAIN_BLACKLIST = [
   'javascript:',
@@ -15,6 +25,13 @@ const DOMAIN_BLACKLIST = [
   'taobao.com',
   'tmall.com',
   'jd.com',
+  'pinduoduo.com',
+  'yangkeduo.com',
+  '1688.com',
+  'alibaba.com',
+  'suning.com',
+  'vip.com',
+  'kaola.com',
   // 明显非中文内容站 / 噪音
   'microsoft.com',
   'apple.com',
@@ -23,6 +40,13 @@ const DOMAIN_BLACKLIST = [
   'reddit.com',
   'youtube.com',
   'tacobell.com',
+  // 广告 / 招商 / 导购联盟
+  'smzdm.com/p/',
+  'duomai.com',
+  'linkstars.com',
+  'click.',
+  'track.',
+  'aff.',
 ];
 
 /** 中文内容站优先（用于排序加权） */
@@ -53,10 +77,86 @@ const ZH_DOMAIN_BONUS = [
   'guokr.com',
 ];
 
+/**
+ * 广告 / 引流 / 卖课话术关键词（命中标题或摘要即屏蔽）
+ * 注意：避免误伤正常「副业赚钱经验」类干货，尽量用强意图词
+ */
+const SPAM_KEYWORDS = [
+  // 引流私域
+  '加微信', '加我微信', '加v', '加V', '加薇', '加威信', '私信领取',
+  '扫码加', '扫码进群', '扫码咨询', '扫一扫', '二维码',
+  'vx同号', 'VX同号', '薇信', '威信同号', '微信同号',
+  '进群领取', '拉你进群', '免费进群', '粉丝群', '交流群',
+  '关注公众号回复', '后台回复', '私聊我', '扣1领取',
+  // 广告推销
+  '限时优惠', '限时特价', '点击领取', '免费领取', '0元领取',
+  '立即购买', '马上抢购', '下单立减', '买一送一', '全网最低',
+  '代理招商', '招代理', '加盟费', '一件代发', '微商',
+  '刷单', '日入过万', '月入三万', '月入十万', '躺赚',
+  '稳赚不赔', '保本保息', '内幕消息',
+  // 卖课 / 知识付费硬广
+  '课程优惠', '训练营报名', '名额有限', '抢报', '早鸟价',
+  '报名立减', '名师带学', '内部名额',
+  // 导流站 / 软广套路
+  '点击下方', '链接在评论', '评论区领取', '主页领取',
+  '免费送你', '送你一份', '资料包领取', '资料免费领',
+  '添加客服', '联系客服', '咨询客服', '在线客服',
+  // 明显广告标题模板
+  '亲测有效', '小白一天', '有手就行', '冷门赛道日入',
+  '暴利项目', '躺着赚钱', '轻松月入',
+];
+
+const SPAM_REGEXES = [
+  /加\s*[vVwW微薇威]/,
+  /v\s*信|vx|VX|ＶＸ/,
+  /微信[：:\s]*[a-zA-Z0-9_-]{5,}/,
+  /日入\s*\d+/,
+  /月入\s*\d+/,
+  /【广告】|\[广告\]|赞助内容|推广信息/,
+  /免费领(取|资料|课)/,
+  /(训练营|系统课|付费课|网课).{0,8}(报名|优惠|名额)/,
+  /扫码.{0,6}(进群|加|领|咨询)/,
+  /点击(链接|蓝字|下方)/,
+  /原价.{0,12}现价/,
+];
+
 function isBadUrl(url) {
   if (!url || !/^https?:\/\//i.test(url)) return true;
   const lower = url.toLowerCase();
   return DOMAIN_BLACKLIST.some((b) => lower.includes(b));
+}
+
+/**
+ * 是否广告 / 引流垃圾（标题 + 摘要 + URL 文本）
+ * @returns {{ spam: boolean, reason?: string }}
+ */
+function detectSpam(item) {
+  const title = String(item?.title || '');
+  const snippet = String(item?.snippet || '');
+  const url = String(item?.url || '');
+  const text = `${title}\n${snippet}\n${url}`;
+
+  for (const kw of SPAM_KEYWORDS) {
+    if (text.includes(kw)) {
+      return { spam: true, reason: `关键词:${kw}` };
+    }
+  }
+  for (const re of SPAM_REGEXES) {
+    if (re.test(text)) {
+      return { spam: true, reason: `规则:${re}` };
+    }
+  }
+
+  // 标题极短且全是促销符号
+  if (/[!！]{2,}/.test(title) && /领|抢|赚|免费|加/.test(title)) {
+    return { spam: true, reason: '促销标题' };
+  }
+
+  return { spam: false };
+}
+
+function isSpamResult(item) {
+  return detectSpam(item).spam;
 }
 
 /**
@@ -126,10 +226,20 @@ function toChineseQuery(query) {
   return `${q} 中文`;
 }
 
-async function searchBaidu(page, query, limit = 8) {
+function filterSearchHits(raw, limit) {
+  return rankChineseResults(
+    raw
+      .filter(isChineseResult)
+      .filter((item) => !isSpamResult(item))
+      .filter((item) => !isBadUrl(item.url))
+  ).slice(0, limit);
+}
+
+async function searchBaidu(page, query, limit = SEARCH_PER_ENGINE) {
   const q = encodeURIComponent(toChineseQuery(query));
-  // rn=20 多取一些再过滤英文
-  await page.goto(`https://www.baidu.com/s?wd=${q}&rn=20&ie=utf-8`, {
+  // rn 多取，过滤英文 / 广告后再截断
+  const rn = Math.min(50, Math.max(20, limit * 3));
+  await page.goto(`https://www.baidu.com/s?wd=${q}&rn=${rn}&ie=utf-8`, {
     waitUntil: 'domcontentloaded',
     timeout: 45000,
   });
@@ -148,40 +258,47 @@ async function searchBaidu(page, query, limit = 8) {
       if (title && url) results.push({ title, url, snippet });
     });
     return results;
-  }, Math.max(limit * 2, 12));
+  }, Math.max(limit * 3, 24));
 
-  return rankChineseResults(raw.filter(isChineseResult)).slice(0, limit);
+  return filterSearchHits(raw, limit);
 }
 
-async function searchBing(page, query, limit = 8) {
-  // 强制中文区 + 简体界面；query 带中文约束
+async function searchBing(page, query, limit = SEARCH_PER_ENGINE) {
+  // 强制中文区 + 简体界面；query 带中文约束；多页拼接
   const q = encodeURIComponent(toChineseQuery(query));
-  await page.goto(
-    `https://cn.bing.com/search?q=${q}&setlang=zh-Hans&mkt=zh-CN&cc=CN&ensearch=0`,
-    {
-      waitUntil: 'domcontentloaded',
-      timeout: 45000,
-    }
-  );
-  await browserService.humanDelay(2500, 4000);
-  await page.waitForSelector('#b_results li.b_algo, #b_results .b_algo', { timeout: 12000 }).catch(() => {});
+  const pagesToFetch = limit > 10 ? 2 : 1;
+  let raw = [];
 
-  const raw = await safeEvaluate(page, (max) => {
-    const results = [];
-    const nodes = document.querySelectorAll('#b_results > li.b_algo, #b_results li.b_algo');
-    nodes.forEach((li) => {
-      if (results.length >= max) return;
-      const a = li.querySelector('h2 a');
-      const sn = li.querySelector('.b_caption p, .b_lineclamp2, .b_algoSlug');
-      const title = (a?.innerText || a?.textContent || '').trim();
-      const url = a?.href || '';
-      const snippet = (sn?.innerText || sn?.textContent || '').trim();
-      if (title && url) results.push({ title, url, snippet });
-    });
-    return results;
-  }, Math.max(limit * 2, 12));
+  for (let pageIdx = 0; pageIdx < pagesToFetch; pageIdx++) {
+    const first = pageIdx * 10 + 1;
+    await page.goto(
+      `https://cn.bing.com/search?q=${q}&setlang=zh-Hans&mkt=zh-CN&cc=CN&ensearch=0&first=${first}`,
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: 45000,
+      }
+    );
+    await browserService.humanDelay(2000, 3500);
+    await page.waitForSelector('#b_results li.b_algo, #b_results .b_algo', { timeout: 12000 }).catch(() => {});
 
-  return rankChineseResults(raw.filter(isChineseResult)).slice(0, limit);
+    const batch = await safeEvaluate(page, (max) => {
+      const results = [];
+      const nodes = document.querySelectorAll('#b_results > li.b_algo, #b_results li.b_algo');
+      nodes.forEach((li) => {
+        if (results.length >= max) return;
+        const a = li.querySelector('h2 a');
+        const sn = li.querySelector('.b_caption p, .b_lineclamp2, .b_algoSlug');
+        const title = (a?.innerText || a?.textContent || '').trim();
+        const url = a?.href || '';
+        const snippet = (sn?.innerText || sn?.textContent || '').trim();
+        if (title && url) results.push({ title, url, snippet });
+      });
+      return results;
+    }, 15);
+    raw = raw.concat(batch || []);
+  }
+
+  return filterSearchHits(raw, limit);
 }
 
 async function extractBody(page, url) {
@@ -234,10 +351,14 @@ async function searchAndSaveArticles(topic, { force = false } = {}) {
       WHERE topic_id = ? AND created_at > datetime('now', '-5 minutes')
     `).get(topic.id);
     if (recent?.c > 0) {
-      const articles = db.prepare(`
-        SELECT * FROM source_articles WHERE topic_id = ? ORDER BY created_at DESC LIMIT 20
-      `).all(topic.id);
-      return { articles, cached: true };
+      const articles = listArticlesByTopic(topic.id);
+      // 缓存也过滤一次广告（历史数据可能含垃圾）
+      const cleaned = articles.filter((a) => !isSpamResult(a));
+      return {
+        articles: cleaned,
+        cached: true,
+        filtered_spam: articles.length - cleaned.length,
+      };
     }
   }
 
@@ -251,39 +372,58 @@ async function searchAndSaveArticles(topic, { force = false } = {}) {
   /** @type {Array<{title:string,url:string,snippet:string}>} */
   let raw = [];
   const seenUrls = new Set();
+  let spamBlocked = 0;
 
   try {
-    // 中文赛道：百度优先，Bing 中文站兜底（避免国际 Bing 吐英文垃圾）
-    for (const q of queries.slice(0, 4)) {
+    // 中文赛道：百度优先，Bing 中文站兜底；多查询词拉满候选
+    for (const q of queries.slice(0, SEARCH_QUERY_LIMIT)) {
       console.log(`[Search] 查询(中文优先): ${q}`);
       let batch = [];
       try {
-        batch = await searchBaidu(page, q, 6);
+        batch = await searchBaidu(page, q, SEARCH_PER_ENGINE);
         if (batch.length) engine = 'baidu';
       } catch (err) {
         console.warn('[Search] 百度失败:', err.message);
         batch = [];
       }
-      if (batch.length < 3) {
+      // 结果不够时用 Bing 补量
+      if (batch.length < Math.ceil(SEARCH_PER_ENGINE * 0.5)) {
         try {
-          const more = await searchBing(page, q, 6);
+          const more = await searchBing(page, q, SEARCH_PER_ENGINE);
           if (more.length && engine !== 'baidu') engine = 'bing';
           batch = batch.concat(more);
         } catch (err) {
           console.warn('[Search] Bing 失败:', err.message);
         }
+      } else {
+        // 即使百度够量，也轻量补一轮 Bing 增加多样性
+        try {
+          const more = await searchBing(page, q, Math.min(8, SEARCH_PER_ENGINE));
+          batch = batch.concat(more);
+        } catch { /* optional */ }
       }
+
       for (const item of batch) {
         if (!item.url || seenUrls.has(item.url)) continue;
         if (isBadUrl(item.url)) continue;
-        if (!isChineseResult(item)) continue; // 丢掉纯英文
+        if (!isChineseResult(item)) continue;
+        const spam = detectSpam(item);
+        if (spam.spam) {
+          spamBlocked += 1;
+          console.log(`[Search] 屏蔽广告/引流: ${item.title.slice(0, 40)} (${spam.reason})`);
+          continue;
+        }
         seenUrls.add(item.url);
         raw.push(item);
       }
-      if (raw.length >= 10) break;
+      if (raw.length >= SEARCH_RAW_CAP) break;
     }
 
-    const filtered = rankChineseResults(raw).slice(0, 8);
+    const filtered = rankChineseResults(raw).slice(0, SEARCH_RESULT_LIMIT);
+    console.log(
+      `[Search] 候选 ${raw.length} → 入库 ${filtered.length}，屏蔽广告/引流 ${spamBlocked}`
+    );
+
     if (filtered.length === 0) {
       console.warn('[Search] 无搜索结果，使用话题占位素材');
       const id = uuidv4();
@@ -312,11 +452,12 @@ async function searchAndSaveArticles(topic, { force = false } = {}) {
         cached: false,
         search_engine: 'fallback',
         queries,
-        warning: '搜索无结果，已用话题占位素材',
+        filtered_spam: spamBlocked,
+        warning: '搜索无结果（或全被广告过滤），已用话题占位素材',
       };
     }
 
-    const extractCount = Math.min(3, filtered.length);
+    const extractCount = Math.min(SEARCH_EXTRACT_COUNT, filtered.length);
     const articles = [];
 
     for (let i = 0; i < filtered.length; i++) {
@@ -332,6 +473,12 @@ async function searchAndSaveArticles(topic, { force = false } = {}) {
         } catch (err) {
           console.warn('[Search] 正文抽取失败:', err.message);
           body_status = 'failed';
+        }
+        // 正文层再过一次广告过滤（摘要干净但正文是软广）
+        if (body && isSpamResult({ title: item.title, snippet: body.slice(0, 1500), url: item.url })) {
+          spamBlocked += 1;
+          console.log(`[Search] 正文判定广告/引流，丢弃: ${item.title.slice(0, 40)}`);
+          continue;
         }
         if (!body && item.snippet) {
           body = item.snippet;
@@ -364,7 +511,14 @@ async function searchAndSaveArticles(topic, { force = false } = {}) {
       );
     }
 
-    return { articles, cached: false, search_engine: engine, queries };
+    return {
+      articles,
+      cached: false,
+      search_engine: engine,
+      queries,
+      filtered_spam: spamBlocked,
+      total_candidates: raw.length,
+    };
   } finally {
     await page.close().catch(() => {});
     await context.close().catch(() => {});
@@ -372,9 +526,11 @@ async function searchAndSaveArticles(topic, { force = false } = {}) {
 }
 
 function listArticlesByTopic(topicId) {
-  return db.prepare(`
-    SELECT * FROM source_articles WHERE topic_id = ? ORDER BY created_at DESC LIMIT 30
-  `).all(topicId);
+  const rows = db.prepare(`
+    SELECT * FROM source_articles WHERE topic_id = ? ORDER BY created_at DESC LIMIT ?
+  `).all(topicId, SEARCH_LIST_LIMIT);
+  // 列表出口再挡一层广告（含历史缓存）
+  return rows.filter((a) => !isSpamResult(a));
 }
 
 function getArticleById(id) {
@@ -385,4 +541,6 @@ module.exports = {
   searchAndSaveArticles,
   listArticlesByTopic,
   getArticleById,
+  detectSpam,
+  isSpamResult,
 };
